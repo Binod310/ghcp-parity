@@ -4,6 +4,19 @@ Local proxy for VS Code GitHub Copilot. It routes native Copilot requests throug
 `127.0.0.1`, preserves selected model IDs, compacts eligible input context, and
 records per-request token estimates. No duplicate model appears in VS Code picker.
 
+## Implemented Features
+
+| Feature                | Behavior                                                                                                                               | Source                                                                                                                         | Tests / verification                                            |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| Native VS Code routing | Routes Copilot Chat, agent, completions, model discovery, and native request paths through local proxy without changing `model`.       | [server.ts](src/server.ts)                                                                                                     | Select models in VS Code; inspect `/stats/latest`.              |
+| Safe VS Code lifecycle | Adds/removes only marker-owned JSONC settings; supports macOS, Windows, Linux, custom settings files, and refuses unmanaged overrides. | [vscode-config.ts](src/vscode-config.ts)                                                                                       | [vscode-config.test.ts](tests/vscode-config.test.ts)            |
+| Copilot OAuth          | Device login, short-lived API-token exchange, expiry refresh, retry after upstream `401`, and Headroom-auth import.                    | [auth.ts](src/auth.ts)                                                                                                         | [auth.test.ts](tests/auth.test.ts)                              |
+| Enterprise routing     | Persists GitHub's validated advertised Business/Enterprise API endpoint; `COPILOT_BASE_URL` explicitly overrides it.                   | [auth.ts](src/auth.ts), [server.ts](src/server.ts)                                                                             | `curl -sS http://127.0.0.1:8796/health`                         |
+| Input optimization     | Compacts eligible repeated/log/JSON text while protecting configured sensitive context and exact tool content.                         | [optimizer.ts](src/optimizer.ts), [lossless-compaction.ts](src/lossless-compaction.ts), [json-crusher.ts](src/json-crusher.ts) | `curl -sS http://127.0.0.1:8796/stats/summary`                  |
+| Terse output mode      | Injects `lite`, `full`, or `ultra` concise-output instructions without changing selected model.                                        | [terse-mode.ts](src/terse-mode.ts)                                                                                             | [terse-mode.test.ts](tests/terse-mode.test.ts)                  |
+| Request telemetry      | Records route, model, status, before/after estimated input tokens, savings, and available upstream usage.                              | [telemetry.ts](src/telemetry.ts), [server.ts](src/server.ts)                                                                   | [telemetry.test.ts](tests/telemetry.test.ts), `/stats/requests` |
+| Corporate TLS          | Adds configured corporate CA bundle to Node's public trust roots for proxy and auth traffic.                                           | [upstream-agent.ts](src/upstream-agent.ts)                                                                                     | `curl -sS http://127.0.0.1:8796/health`                         |
+
 ## Requirements
 
 - Node.js 20 or later
