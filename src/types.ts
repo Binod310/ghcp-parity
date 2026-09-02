@@ -44,6 +44,7 @@ export interface AuthStatusView {
   expiresAt: string | null;
   tokenType: "api" | "oauth" | null;
   hasRefreshToken: boolean;
+  copilotApiUrl: string | null;
   authFilePath: string;
 }
 

@@ -74,7 +74,6 @@ npm run dev -- wrap vscode --port 8796 --project MyProject \
 - `github.copilot.advanced.debug.overrideProxyUrl`
 - `github.copilot.advanced.debug.overrideCapiUrl`
 - `github.copilot.advanced.chatOverrideProxyUrl`
-- `github.copilot.advanced.debug.overrideAuthType`
 
 Restart VS Code after configuring. Continue using native model picker: selected
 models travel through parity unchanged.
@@ -112,6 +111,10 @@ env \
 
 Supported terse levels: `off` (default), `lite`, `full`, `ultra`. Stop proxy with
 `Ctrl+C`. While stopped, configured Copilot requests fail rather than bypass parity.
+
+For Business and Enterprise accounts, parity uses the validated API endpoint
+advertised during token exchange, such as `https://api.business.githubcopilot.com`.
+Set `COPILOT_BASE_URL` only when intentionally pinning a different Copilot API host.
 
 ## Verify
 

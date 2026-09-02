@@ -140,4 +140,27 @@ describe("auth helpers", () => {
     clearStoredAuth();
     delete process.env.COPILOT_PARITY_HOME_DIR;
   });
+
+  it("stores a validated advertised Copilot API URL", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "parity-auth-"));
+    process.env.COPILOT_PARITY_HOME_DIR = path.join(tempDir, "local-home");
+
+    writeStoredAuth({
+      accessToken: "tid-token",
+      source: "test",
+      copilotApiUrl: "https://api.business.githubcopilot.com/",
+    });
+
+    assert.equal(
+      readStoredAuth()?.copilotApiUrl,
+      "https://api.business.githubcopilot.com",
+    );
+    assert.equal(
+      getAuthStatusView().copilotApiUrl,
+      "https://api.business.githubcopilot.com",
+    );
+
+    clearStoredAuth();
+    delete process.env.COPILOT_PARITY_HOME_DIR;
+  });
 });

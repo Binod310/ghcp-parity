@@ -7,6 +7,7 @@ const MARKER_END = "// --- end Copilot Parity Proxy ---";
 const PROXY_KEY = "github.copilot.advanced.debug.overrideProxyUrl";
 const CAPI_KEY = "github.copilot.advanced.debug.overrideCapiUrl";
 const CHAT_PROXY_KEY = "github.copilot.advanced.chatOverrideProxyUrl";
+// Detect stale copies but do not write an unsupported setting.
 const AUTH_KEY = "github.copilot.advanced.debug.overrideAuthType";
 
 interface VSCodeConfigOptions {
@@ -147,8 +148,7 @@ function managedBlock(
     `\t${marker}`,
     `\t${JSON.stringify(PROXY_KEY)}: ${JSON.stringify(proxyUrl)},`,
     `\t${JSON.stringify(CAPI_KEY)}: ${JSON.stringify(proxyUrl)},`,
-    `\t${JSON.stringify(CHAT_PROXY_KEY)}: ${JSON.stringify(proxyUrl)},`,
-    `\t${JSON.stringify(AUTH_KEY)}: "token"`,
+    `\t${JSON.stringify(CHAT_PROXY_KEY)}: ${JSON.stringify(proxyUrl)}`,
     `\t${MARKER_END}`,
   ].join(lineSep);
 }
@@ -219,7 +219,6 @@ export function configureVSCode(options: VSCodeConfigOptions): void {
     console.log(
       `\t${JSON.stringify(CHAT_PROXY_KEY)}: ${JSON.stringify(proxyUrl)},`,
     );
-    console.log(`\t${JSON.stringify(AUTH_KEY)}: "token"`);
     console.log(`\t${MARKER_END}`);
     console.log(`\nSettings file location: ${settingsPath}\n`);
     return;

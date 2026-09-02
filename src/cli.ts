@@ -81,6 +81,7 @@ copilotAuth
       const stored = writeStoredAuth({
         accessToken: exchanged.apiToken,
         expiresAt: exchanged.expiresAt,
+        copilotApiUrl: exchanged.copilotApiUrl,
         refreshToken: oauthToken,
         source: "device-login",
         tokenType: "api",

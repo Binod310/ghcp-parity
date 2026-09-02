@@ -10,6 +10,7 @@ const authFetchAgent = createUpstreamFetchAgent();
 export interface StoredAuth {
   accessToken: string;
   expiresAt: string | null;
+  copilotApiUrl?: string | null;
   source: string;
   updatedAt: string;
   refreshToken?: string | null;
@@ -50,6 +51,7 @@ export function readStoredAuth(): StoredAuth | null {
     return {
       accessToken: parsed.accessToken,
       expiresAt: typeof parsed.expiresAt === "string" ? parsed.expiresAt : null,
+      copilotApiUrl: normalizeCopilotApiUrl(parsed.copilotApiUrl) ?? null,
       source: typeof parsed.source === "string" ? parsed.source : "unknown",
       updatedAt:
         typeof parsed.updatedAt === "string"
@@ -67,6 +69,7 @@ export function readStoredAuth(): StoredAuth | null {
 export function writeStoredAuth(input: {
   accessToken: string;
   expiresAt?: string | null;
+  copilotApiUrl?: string | null;
   source: string;
   refreshToken?: string | null;
   tokenType?: "api" | "oauth";
@@ -77,6 +80,7 @@ export function writeStoredAuth(input: {
   const stored: StoredAuth = {
     accessToken: input.accessToken,
     expiresAt: input.expiresAt ?? null,
+    copilotApiUrl: normalizeCopilotApiUrl(input.copilotApiUrl) ?? null,
     source: input.source,
     updatedAt: new Date().toISOString(),
     refreshToken: input.refreshToken ?? null,
@@ -152,6 +156,7 @@ export async function resolveCopilotApiToken(
     const updated = writeStoredAuth({
       accessToken: exchanged.apiToken,
       expiresAt: exchanged.expiresAt,
+      copilotApiUrl: exchanged.copilotApiUrl,
       refreshToken: stored.accessToken,
       source: `${stored.source}:auto-exchange`,
       tokenType: "api",
@@ -171,6 +176,7 @@ export async function resolveCopilotApiToken(
   const updated = writeStoredAuth({
     accessToken: exchanged.apiToken,
     expiresAt: exchanged.expiresAt,
+    copilotApiUrl: exchanged.copilotApiUrl,
     refreshToken: stored.refreshToken,
     source: `${stored.source}:auto-refresh`,
     tokenType: "api",
@@ -198,6 +204,7 @@ export async function refreshStoredCopilotApiToken(deps?: {
   const updated = writeStoredAuth({
     accessToken: exchanged.apiToken,
     expiresAt: exchanged.expiresAt,
+    copilotApiUrl: exchanged.copilotApiUrl,
     refreshToken: refreshSourceToken,
     source: `${stored.source}:forced-refresh`,
     tokenType: "api",
@@ -360,7 +367,11 @@ export async function exchangeOAuthForCopilotApiToken(
     tokenExchangeUrl?: string;
     timeoutMs?: number;
   },
-): Promise<{ apiToken: string; expiresAt: string | null }> {
+): Promise<{
+  apiToken: string;
+  expiresAt: string | null;
+  copilotApiUrl?: string | null;
+}> {
   const tokenExchangeUrl =
     options?.tokenExchangeUrl ??
     process.env.GITHUB_COPILOT_TOKEN_EXCHANGE_URL ??
@@ -401,6 +412,9 @@ export async function exchangeOAuthForCopilotApiToken(
   return {
     apiToken,
     expiresAt: parseExpiry(payload.expires_at),
+    copilotApiUrl: normalizeCopilotApiUrl(
+      isRecord(payload.endpoints) ? payload.endpoints.api : undefined,
+    ),
   };
 }
 
@@ -414,6 +428,7 @@ export function getAuthStatusView(): AuthStatusView {
     expiresAt: stored?.expiresAt ?? null,
     tokenType: stored?.tokenType ?? null,
     hasRefreshToken: Boolean(stored?.refreshToken),
+    copilotApiUrl: stored?.copilotApiUrl ?? null,
     authFilePath: authFilePath(),
   };
 }
@@ -470,6 +485,28 @@ function parseExpiry(value: unknown): string | null {
     return Number.isNaN(millis) ? null : new Date(millis).toISOString();
   }
   return null;
+}
+
+function normalizeCopilotApiUrl(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  try {
+    const url = new URL(value.trim());
+    if (
+      url.protocol !== "https:" ||
+      !url.hostname.toLowerCase().endsWith(".githubcopilot.com")
+    ) {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -1261,6 +1261,7 @@ function resolveServerOptions(
     copilotBaseUrl:
       customOptions?.copilotBaseUrl ??
       process.env.COPILOT_BASE_URL ??
+      getAuthStatusView().copilotApiUrl ??
       "https://api.githubcopilot.com",
     copilotModelsPath:
       customOptions?.copilotModelsPath ??

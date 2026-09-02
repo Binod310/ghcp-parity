@@ -30,7 +30,7 @@ describe("vscode config", () => {
     assert.match(configured, /overrideProxyUrl/);
     assert.match(configured, /overrideCapiUrl/);
     assert.match(configured, /chatOverrideProxyUrl/);
-    assert.match(configured, /overrideAuthType/);
+    assert.doesNotMatch(configured, /overrideAuthType/);
     assert.match(configured, /\/p\/Headroom/);
     assert.match(configured, /editor\.fontSize/);
     assert.match(configured, /Night Owl/);
