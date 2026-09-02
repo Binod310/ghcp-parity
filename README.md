@@ -14,7 +14,7 @@ records per-request token estimates. No duplicate model appears in VS Code picke
 | Enterprise routing     | Persists GitHub's validated advertised Business/Enterprise API endpoint; `COPILOT_BASE_URL` explicitly overrides it.                   | [auth.ts](src/auth.ts), [server.ts](src/server.ts)                                                                             | `curl -sS http://127.0.0.1:8796/health`                         |
 | Input optimization     | Compacts eligible repeated/log/JSON text while protecting configured sensitive context and exact tool content.                         | [optimizer.ts](src/optimizer.ts), [lossless-compaction.ts](src/lossless-compaction.ts), [json-crusher.ts](src/json-crusher.ts) | `curl -sS http://127.0.0.1:8796/stats/summary`                  |
 | Terse output mode      | Injects `lite`, `full`, or `ultra` concise-output instructions without changing selected model.                                        | [terse-mode.ts](src/terse-mode.ts)                                                                                             | [terse-mode.test.ts](tests/terse-mode.test.ts)                  |
-| Request telemetry      | Records route, model, status, before/after estimated input tokens, savings, and available upstream usage.                              | [telemetry.ts](src/telemetry.ts), [server.ts](src/server.ts)                                                                   | [telemetry.test.ts](tests/telemetry.test.ts), `/stats/requests` |
+| Request telemetry      | Records route, model, status, input savings, and completed-stream output-token estimates. Persists only telemetry fields, never prompts, completions, or credentials. | [telemetry.ts](src/telemetry.ts), [telemetry-store.ts](src/telemetry-store.ts), [stream-output.ts](src/stream-output.ts), [server.ts](src/server.ts) | [telemetry.test.ts](tests/telemetry.test.ts), [stream-output.test.ts](tests/stream-output.test.ts), `/stats/requests` |
 | Corporate TLS          | Adds configured corporate CA bundle to Node's public trust roots for proxy and auth traffic.                                           | [upstream-agent.ts](src/upstream-agent.ts)                                                                                     | `curl -sS http://127.0.0.1:8796/health`                         |
 
 ## Requirements
@@ -147,8 +147,14 @@ on `/responses`. `gpt-4o-mini-2024-07-18` requests on `/chat/completions` are
 typically Copilot's separate internal title, todo, or command-risk helper calls.
 
 `saved_tokens` measures estimated input-token reduction from request compaction.
-Streaming Copilot responses often omit output usage, so output-token savings from
-terse mode are verified from response behavior rather than telemetry.
+`total_output_tokens` measures text estimated from completed native SSE streams.
+It is not output-token savings: providers often omit a baseline output count, so
+terse-mode savings require a controlled comparison.
+
+Telemetry persists across restarts at
+`~/.copilot-parity-local/telemetry.jsonl`, with user-only permissions. It contains
+route, model, status, timestamp, and numeric usage fields only. Set
+`COPILOT_PARITY_TELEMETRY_FILE` to choose another local file.
 
 ## Local auth flow
 

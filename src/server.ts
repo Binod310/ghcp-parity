@@ -15,6 +15,8 @@ import {
 } from "./telemetry";
 import { optimizePayload } from "./optimizer";
 import { applyTerseMode, resolveTerseLevel } from "./terse-mode";
+import { appendTelemetry, loadTelemetry } from "./telemetry-store";
+import { createSseOutputCounter } from "./stream-output";
 import { createUpstreamFetchAgent } from "./upstream-agent";
 import type { RequestUsageTelemetry, ServerOptions } from "./types";
 
@@ -22,7 +24,7 @@ const upstreamFetchAgent = createUpstreamFetchAgent();
 
 export function createServer(customOptions?: Partial<ServerOptions>) {
   const options = resolveServerOptions(customOptions);
-  const recentRequests: RequestUsageTelemetry[] = [];
+  const recentRequests = loadTelemetry(options.maxRecentRequests);
   const app = express();
 
   // Log ALL incoming requests to debug VS Code routing
@@ -268,6 +270,7 @@ export function createServer(customOptions?: Partial<ServerOptions>) {
         after_tokens: afterTokens,
         saved_tokens: tokenDelta.savedTokens,
         saved_percent: tokenDelta.savedPercent,
+        output_tokens: null,
         aiu_before: null,
         aiu_after: aiuAfter,
         aiu_saved: null,
@@ -1106,8 +1109,12 @@ export function createServer(customOptions?: Partial<ServerOptions>) {
       res.status(upstreamResponse.status);
 
       if (isStreaming && upstreamResponse.body) {
-        // Pipe streaming SSE response directly to client
-        upstreamResponse.body.pipe(res);
+        const outputCounter = createSseOutputCounter((outputTokens) => {
+          telemetry.output_tokens = outputTokens;
+          appendTelemetry(telemetry);
+          logTelemetry(telemetry);
+        });
+        upstreamResponse.body.pipe(outputCounter).pipe(res);
       } else {
         const rawText = await upstreamResponse.text();
         res.send(rawText);
@@ -1208,14 +1215,16 @@ export function createServer(customOptions?: Partial<ServerOptions>) {
         },
       );
 
+      let telemetry: RequestUsageTelemetry | undefined;
       if (beforeTokens !== null && transformedTokens !== null) {
-        const telemetry = buildUsageTelemetry({
+        telemetry = buildUsageTelemetry({
           request_id: randomUUID(),
           model: String(body?.model ?? "unknown"),
           before_tokens: beforeTokens,
           after_tokens: transformedTokens,
           saved_tokens: tokenDelta.savedTokens,
           saved_percent: tokenDelta.savedPercent,
+          output_tokens: null,
           aiu_before: null,
           aiu_after: null,
           aiu_saved: null,
@@ -1232,7 +1241,15 @@ export function createServer(customOptions?: Partial<ServerOptions>) {
       res.status(upstreamResponse.status);
 
       if (isStreaming && upstreamResponse.body) {
-        upstreamResponse.body.pipe(res);
+        const outputCounter = createSseOutputCounter((outputTokens) => {
+          if (!telemetry) {
+            return;
+          }
+          telemetry.output_tokens = outputTokens;
+          appendTelemetry(telemetry);
+          logTelemetry(telemetry);
+        });
+        upstreamResponse.body.pipe(outputCounter).pipe(res);
       } else {
         const rawText = await upstreamResponse.text();
         res.send(rawText);
@@ -1381,6 +1398,7 @@ function pushTelemetry(
   if (recentRequests.length > maxRecentRequests) {
     recentRequests.shift();
   }
+  appendTelemetry(telemetry);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

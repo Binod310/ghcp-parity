@@ -7,6 +7,7 @@ export interface RequestUsageTelemetry {
   after_tokens: NullableNumber;
   saved_tokens: NullableNumber;
   saved_percent: NullableNumber;
+  output_tokens?: NullableNumber;
   aiu_before: NullableNumber;
   aiu_after: NullableNumber;
   aiu_saved: NullableNumber;
@@ -55,6 +56,7 @@ export interface TelemetrySummary {
   total_before_tokens: number;
   total_after_tokens: number;
   total_saved_tokens: number;
+  total_output_tokens: number;
   average_saved_percent: number;
   total_aiu_after: number;
 }

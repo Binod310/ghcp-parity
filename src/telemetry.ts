@@ -13,6 +13,7 @@ const usageTelemetrySchema = z.object({
   after_tokens: z.number().nullable(),
   saved_tokens: z.number().nullable(),
   saved_percent: z.number().nullable(),
+  output_tokens: z.number().nullable().optional().default(null),
   aiu_before: z.number().nullable(),
   aiu_after: z.number().nullable(),
   aiu_saved: z.number().nullable(),
@@ -84,6 +85,7 @@ export function buildTelemetrySummary(
   let totalBefore = 0;
   let totalAfter = 0;
   let totalSaved = 0;
+  let totalOutput = 0;
   let savedPercentSum = 0;
   let savedPercentCount = 0;
   let totalAiuAfter = 0;
@@ -103,6 +105,9 @@ export function buildTelemetrySummary(
     if (typeof request.saved_tokens === "number") {
       totalSaved += request.saved_tokens;
     }
+    if (typeof request.output_tokens === "number") {
+      totalOutput += request.output_tokens;
+    }
     if (typeof request.saved_percent === "number") {
       savedPercentSum += request.saved_percent;
       savedPercentCount += 1;
@@ -119,6 +124,7 @@ export function buildTelemetrySummary(
     total_before_tokens: totalBefore,
     total_after_tokens: totalAfter,
     total_saved_tokens: totalSaved,
+    total_output_tokens: totalOutput,
     average_saved_percent:
       savedPercentCount > 0 ? savedPercentSum / savedPercentCount : 0,
     total_aiu_after: totalAiuAfter,
