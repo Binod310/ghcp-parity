@@ -1,0 +1,986 @@
+import type { ServerOptions } from "./types";
+import { crushJsonInText } from "./json-crusher";
+import {
+  compactLossless,
+  isGrepOutput,
+  isLogOutput,
+  isDiffOutput,
+} from "./lossless-compaction";
+
+/**
+ * Default tools to exclude from compression (from Headroom's DEFAULT_EXCLUDE_TOOLS).
+ *
+ * These tools provide exact content needed for other operations:
+ * - Read/Glob/Grep: Exact file contents/search results needed for edits
+ * - Write/Edit: Change records that must remain verbatim
+ * - WebSearch/WebFetch: Reference data that must stay intact
+ *
+ * Note: Bash is NOT excluded - its outputs (logs, test results) are ideal
+ * compression targets. To protect specific tools from lossy compression,
+ * use protect_tool_results or add to exclude_tools.
+ */
+const DEFAULT_EXCLUDE_TOOLS = new Set([
+  "Read",
+  "Glob",
+  "Grep",
+  "Write",
+  "Edit",
+  "WebSearch",
+  "WebFetch",
+  // Lowercase variants for case-insensitive matching
+  "read",
+  "glob",
+  "grep",
+  "write",
+  "edit",
+  "web_search",
+  "web_fetch",
+]);
+
+/**
+ * Headroom-style compression configuration.
+ * Matches Headroom's CompressConfig from headroom/compress.py
+ */
+export interface CompressionConfig {
+  /** Pin first N messages (already cached by provider) - NEVER compress these */
+  frozen_message_count?: number;
+  /** Don't compress last N messages (active conversation) */
+  protect_recent?: number;
+  /** Compress user messages (default: false for coding agents) */
+  compress_user_messages?: boolean;
+  /** Compress system messages (default: true) */
+  compress_system_messages?: boolean;
+  /** Skip messages below this token count */
+  min_tokens_to_compress?: number;
+  /**
+   * Minimum content length (in chars) for block compression.
+   * Below this, overhead exceeds savings. Default: 500 chars.
+   */
+  min_chars_for_block_compression?: number;
+  /** Tool names to exclude from compression (merged with DEFAULT_EXCLUDE_TOOLS) */
+  exclude_tools?: string[];
+  /**
+   * Accuracy guard mode: "strict" = more conservative, undefined = normal
+   * In strict mode: higher thresholds, preserve more content
+   */
+  accuracy_guard?: "strict";
+  /**
+   * Apply lossless compaction to logs/grep/diff outputs
+   * (ANSI strip, run collapse, repeated block folding)
+   */
+  lossless_compaction?: boolean;
+  /**
+   * Detect 'analyze'/'review' intent and protect code from compression.
+   * When enabled, looks for keywords like "analyze", "review", "debug", "fix"
+   * in the most recent user message. If found, preserves code content verbatim
+   * so the model has full details for analysis.
+   * Default: true (Headroom coding agent default)
+   */
+  protect_analysis_context?: boolean;
+  /**
+   * Protect failed tool calls / error outputs (default: true).
+   * Error content below error_protection_max_chars stays verbatim.
+   * Larger errors still compress (LogCompressor preserves error lines).
+   */
+  protect_error_outputs?: boolean;
+  /**
+   * Maximum chars for error protection (default: 8000 ~ 2K tokens).
+   * Errors larger than this still get compressed.
+   */
+  error_protection_max_chars?: number;
+  /**
+   * Don't compress CODE in last N messages (default: 4).
+   * Set 0 to disable. Protects code snippets in recent conversation.
+   */
+  protect_recent_code?: number;
+  /**
+   * Preserve custom/workflow XML tags from compression (default: false).
+   * When false, entire <tag>content</tag> blocks protected verbatim.
+   * When true, only tag markers protected; content can be compressed.
+   */
+  compress_tagged_content?: boolean;
+  /**
+   * Bash/shell tool names (case-insensitive) for search detection.
+   * Default: ['bash', 'shell', 'local_shell']
+   */
+  bash_tool_names?: string[];
+  /**
+   * Compress assistant text blocks (cache-safety trade-off, default: false).
+   *
+   * Default OFF because compressing assistant content changes the bytes that
+   * must match for provider prefix cache hits (Anthropic cache_control,
+   * DeepSeek/OpenAI auto-cache). Our compressors are deterministic (no ML),
+   * but cache eviction or proxy restart could still affect cache hits.
+   *
+   * Enable only if:
+   * - Backend doesn't honor cache_control, OR
+   * - Cache savings are less important than token savings
+   */
+  compress_assistant_text_blocks?: boolean;
+  /**
+   * Minimum tokens for a section/block to compress (default: 20).
+   * More granular than min_tokens_to_compress (which applies at message level).
+   * Blocks below this threshold are skipped even if the message is large.
+   */
+  min_section_tokens?: number;
+  /**
+   * Acceptance threshold when context pressure is LOW (default: 1.0).
+   * Compression is accepted only if: compressed_size / original_size < min_ratio.
+   * - 1.0 = accept ANY compression (any savings)
+   * - 0.85 = accept only if ≥15% savings
+   * - 0.7 = accept only if ≥30% savings
+   * Used to avoid marginal compressions that don't justify overhead.
+   */
+  min_ratio_relaxed?: number;
+  /**
+   * Acceptance threshold when context pressure is HIGH (default: 1.0).
+   * Same logic as min_ratio_relaxed but applies under memory pressure.
+   * Typically same as or lower than min_ratio_relaxed (more aggressive under pressure).
+   */
+  min_ratio_aggressive?: number;
+}
+
+const DEFAULT_CONFIG: Required<CompressionConfig> = {
+  frozen_message_count: 0,
+  protect_recent: 0, // Compress the current user turn; preserve cacheable assistant history
+  compress_user_messages: true,
+  compress_system_messages: true,
+  min_tokens_to_compress: 250, // Headroom default
+  min_chars_for_block_compression: 500, // Headroom default (overhead vs savings)
+  exclude_tools: [], // No extra exclusions (DEFAULT_EXCLUDE_TOOLS always applied)
+  accuracy_guard: undefined as any, // Normal mode
+  lossless_compaction: true, // Enable by default (safe + effective)
+  protect_analysis_context: true, // Headroom default for coding agents
+  protect_error_outputs: true, // Preserve error content (Headroom default)
+  error_protection_max_chars: 8000, // ~2K tokens (Headroom default)
+  protect_recent_code: 4, // Don't compress code in last 4 messages
+  compress_tagged_content: false, // Protect entire XML blocks by default
+  bash_tool_names: ["bash", "shell", "local_shell"], // Shell tool detection
+  compress_assistant_text_blocks: false, // Cache safety (Headroom default)
+  min_section_tokens: 20, // Headroom default for section-level threshold
+  min_ratio_relaxed: 1.0, // Accept any compression (no savings floor)
+  min_ratio_aggressive: 1.0, // Same under pressure (Headroom default)
+};
+
+// Deduplication cache: content hash → compressed version
+const contentCache = new Map<string, string>();
+
+/**
+ * Check if a tool name is excluded from compression.
+ */
+function isToolExcluded(
+  toolName: string | undefined,
+  excludeTools: Set<string>,
+): boolean {
+  if (!toolName) return false;
+
+  // Direct match (case-sensitive)
+  if (excludeTools.has(toolName)) return true;
+
+  // Case-insensitive match
+  const lowerName = toolName.toLowerCase();
+  for (const excluded of excludeTools) {
+    if (excluded.toLowerCase() === lowerName) return true;
+  }
+
+  // Underscore/camelCase variants (e.g., "WebSearch" matches "web_search")
+  const snakeCase = toolName
+    .replace(/([A-Z])/g, "_$1")
+    .toLowerCase()
+    .replace(/^_/, "");
+  if (excludeTools.has(snakeCase)) return true;
+
+  return false;
+}
+
+/**
+ * Detect tool name from message metadata or content.
+ * Supports OpenAI function_call, Anthropic tool_use, etc.
+ */
+function detectToolName(message: Record<string, unknown>): string | undefined {
+  // OpenAI function_call
+  if (message.function_call && isRecord(message.function_call)) {
+    return String(message.function_call.name || "");
+  }
+
+  // OpenAI tool_calls array
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    const firstCall = message.tool_calls[0];
+    if (
+      isRecord(firstCall) &&
+      firstCall.function &&
+      isRecord(firstCall.function)
+    ) {
+      return String(firstCall.function.name || "");
+    }
+  }
+
+  // Anthropic content blocks with tool_use
+  if (Array.isArray(message.content)) {
+    for (const block of message.content) {
+      if (isRecord(block) && block.type === "tool_use" && block.name) {
+        return String(block.name);
+      }
+    }
+  }
+
+  // Tool role message with name
+  if (message.role === "tool" && message.name) {
+    return String(message.name);
+  }
+
+  return undefined;
+}
+
+/**
+ * Check if content has strong error indicators.
+ * Error content should be preserved verbatim (if below size threshold).
+ */
+function hasErrorIndicators(text: string): boolean {
+  const lowerText = text.toLowerCase();
+  const errorKeywords = [
+    "error:",
+    "exception:",
+    "fatal:",
+    "failure:",
+    "failed:",
+    "traceback",
+    "stack trace",
+    "segmentation fault",
+    "core dumped",
+    "panic:",
+    "assertion failed",
+  ];
+
+  return errorKeywords.some((keyword) => lowerText.includes(keyword));
+}
+
+/**
+ * Detect if user wants to analyze/review code (Headroom's protect_analysis_context).
+ *
+ * Looks at the most recent user message for analysis keywords like:
+ * - analyze, review, audit, inspect
+ * - debug, fix, error, bug
+ * - explain, understand, refactor
+ *
+ * When detected, code content should be preserved verbatim for analysis.
+ */
+function detectAnalysisIntent(
+  messages: Array<Record<string, unknown>>,
+): boolean {
+  const analysisKeywords = [
+    "analyze",
+    "analyse",
+    "review",
+    "audit",
+    "inspect",
+    "security",
+    "vulnerability",
+    "bug",
+    "issue",
+    "problem",
+    "explain",
+    "understand",
+    "how does",
+    "what does",
+    "debug",
+    "fix",
+    "error",
+    "wrong",
+    "broken",
+    "refactor",
+    "improve",
+    "optimize",
+    "clean up",
+  ];
+
+  // Find most recent user message
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!isRecord(message)) continue;
+
+    if (message.role === "user") {
+      const content = message.content;
+      if (typeof content === "string") {
+        const contentLower = content.toLowerCase();
+        for (const keyword of analysisKeywords) {
+          if (contentLower.includes(keyword)) {
+            return true;
+          }
+        }
+      }
+      break; // Only check most recent user message
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Detect if content looks like source code.
+ * Simple heuristic: check for common code indicators.
+ */
+function isSourceCode(text: string): boolean {
+  // Check for code markers
+  if (text.includes("```")) return true; // Markdown code blocks
+
+  // Check for common programming patterns
+  const codePatterns = [
+    /^\s*(function|class|def|const|let|var|import|export)\s+/m,
+    /^\s*(public|private|protected|static)\s+/m,
+    /\{[\s\S]*\}/m, // Curly braces (common in many languages)
+    /^\s*\/\/|^\s*\/\*|^\s*\*/m, // Comments
+    /^#include|^using namespace/m, // C/C++
+    /^\s*@(override|interface|component)/im, // Decorators
+  ];
+
+  for (const pattern of codePatterns) {
+    if (pattern.test(text)) return true;
+  }
+
+  // Check for high density of code-like characters
+  const codeChars = (text.match(/[{}()\[\];=<>]/g) || []).length;
+  const density = codeChars / Math.max(text.length, 1);
+  if (density > 0.05) return true; // 5% threshold
+
+  return false;
+}
+
+/**
+ * Check if a tool is a bash/shell tool.
+ */
+function isBashTool(
+  toolName: string | undefined,
+  bashToolNames: string[],
+): boolean {
+  if (!toolName) return false;
+  const lowerName = toolName.toLowerCase();
+  return bashToolNames.some((name) => name.toLowerCase() === lowerName);
+}
+
+/**
+ * Protect custom XML tags from compression (Headroom's tag_protector).
+ *
+ * Replaces <custom-tag>content</custom-tag> with placeholders,
+ * returns cleaned text and protected blocks for restoration.
+ */
+function protectTags(
+  text: string,
+  compressTaggedContent: boolean,
+): {
+  cleanedText: string;
+  protectedBlocks: Array<{ placeholder: string; original: string }>;
+} {
+  const protectedBlocks: Array<{ placeholder: string; original: string }> = [];
+  let cleanedText = text;
+  let placeholderIndex = 0;
+
+  // Known HTML tags to skip (not custom)
+  const knownHtmlTags = new Set([
+    "div",
+    "span",
+    "p",
+    "a",
+    "img",
+    "table",
+    "tr",
+    "td",
+    "th",
+    "ul",
+    "ol",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "strong",
+    "em",
+    "code",
+    "pre",
+    "blockquote",
+    "body",
+    "head",
+    "html",
+    "meta",
+    "link",
+    "script",
+    "style",
+  ]);
+
+  // Find custom tags (non-HTML)
+  // Pattern: <tag>content</tag> or <tag/>
+  const tagPattern = /<(\w+)(?:\s[^>]*)?>[\s\S]*?<\/\1>|<(\w+)(?:\s[^>]*)?\/>/g;
+
+  let match;
+  while ((match = tagPattern.exec(text)) !== null) {
+    const tagName = (match[1] || match[2]).toLowerCase();
+
+    // Skip known HTML tags
+    if (knownHtmlTags.has(tagName)) continue;
+
+    const fullMatch = match[0];
+    const placeholder = `{{HEADROOM_TAG_${placeholderIndex++}}}`;
+
+    if (compressTaggedContent) {
+      // Only protect tag markers, expose content
+      // Extract content between tags
+      const contentMatch = fullMatch.match(/<\w+(?:\s[^>]*)?>(.+)<\/\w+>/s);
+      if (contentMatch) {
+        const content = contentMatch[1];
+        const tagStart = fullMatch.substring(0, fullMatch.indexOf(content));
+        const tagEnd = fullMatch.substring(
+          fullMatch.indexOf(content) + content.length,
+        );
+        protectedBlocks.push({
+          placeholder,
+          original: tagStart + tagEnd,
+        });
+        cleanedText = cleanedText.replace(
+          fullMatch,
+          placeholder + content + placeholder,
+        );
+      } else {
+        // Self-closing tag
+        protectedBlocks.push({ placeholder, original: fullMatch });
+        cleanedText = cleanedText.replace(fullMatch, placeholder);
+      }
+    } else {
+      // Protect entire block verbatim
+      protectedBlocks.push({ placeholder, original: fullMatch });
+      cleanedText = cleanedText.replace(fullMatch, placeholder);
+    }
+  }
+
+  return { cleanedText, protectedBlocks };
+}
+
+/**
+ * Restore protected tags after compression.
+ */
+function restoreTags(
+  text: string,
+  protectedBlocks: Array<{ placeholder: string; original: string }>,
+): string {
+  let restored = text;
+  for (const block of protectedBlocks) {
+    restored = restored.replace(block.placeholder, block.original);
+  }
+  return restored;
+}
+
+/**
+ * Apply compression to text content with full Headroom pipeline.
+ */
+function compressText(
+  text: string,
+  config: Required<CompressionConfig>,
+  toolName?: string,
+): string {
+  // Check minimum character threshold (Headroom's min_chars_for_block_compression)
+  if (text.length < config.min_chars_for_block_compression) {
+    return text;
+  }
+
+  // Check minimum token threshold (message-level)
+  const estimatedTokens = estimateTokens(text);
+  if (estimatedTokens < config.min_tokens_to_compress) {
+    return text;
+  }
+
+  // Check minimum section tokens (block-level, more granular)
+  if (estimatedTokens < config.min_section_tokens) {
+    return text;
+  }
+
+  // Check deduplication cache
+  const contentHash = simpleHash(text);
+  if (contentCache.has(contentHash)) {
+    return contentCache.get(contentHash)!;
+  }
+
+  // Preserve error content below size threshold (Headroom's protect_error_outputs)
+  if (config.protect_error_outputs && hasErrorIndicators(text)) {
+    if (text.length <= config.error_protection_max_chars) {
+      return text; // Small errors preserved verbatim
+    }
+    // Large errors still compress (but LogCompressor preserves error lines)
+  }
+
+  let compressed = text;
+
+  // Step 0: Protect custom XML tags if needed (Headroom's tag_protector)
+  let protectedBlocks: Array<{ placeholder: string; original: string }> = [];
+  if (text.includes("<") && text.includes(">")) {
+    const tagResult = protectTags(text, config.compress_tagged_content);
+    compressed = tagResult.cleanedText;
+    protectedBlocks = tagResult.protectedBlocks;
+  }
+
+  // Step 1: Apply lossless compaction for logs/grep/diffs
+  if (config.lossless_compaction) {
+    if (
+      isGrepOutput(compressed) ||
+      isLogOutput(compressed) ||
+      isDiffOutput(compressed)
+    ) {
+      const lossless = compactLossless(compressed);
+      if (lossless.length < compressed.length) {
+        compressed = lossless;
+      }
+    }
+  }
+
+  // Step 2: JSON array crushing (SmartCrusher)
+  const crushResult = crushJsonInText(compressed);
+  if (crushResult.crushed) {
+    compressed = crushResult.text;
+  }
+
+  // Step 3: Aggressive text compaction
+  compressed = compactText(compressed);
+
+  // Step 4: Restore protected XML tags
+  if (protectedBlocks.length > 0) {
+    compressed = restoreTags(compressed, protectedBlocks);
+  }
+
+  // Step 5: Check min_ratio acceptance threshold (Headroom's min_ratio gates)
+  // Calculate compression ratio: compressed / original
+  const compressionRatio = compressed.length / text.length;
+
+  // Use relaxed threshold by default (could be enhanced to detect context pressure)
+  const minRatio = config.min_ratio_relaxed;
+
+  // Only accept compression if ratio < threshold (i.e., meaningful savings)
+  if (compressionRatio >= minRatio) {
+    compressed = text; // Reject compression - savings too small
+  }
+
+  // In strict accuracy mode, additional 20% savings requirement
+  if (config.accuracy_guard === "strict") {
+    const savingsPercent =
+      ((text.length - compressed.length) / text.length) * 100;
+    if (savingsPercent < 20) {
+      compressed = text; // Revert to original
+    }
+  }
+
+  // Cache the result
+  contentCache.set(contentHash, compressed);
+  return compressed;
+}
+
+export function optimizePayload(
+  route: string,
+  body: unknown,
+  options?: Pick<ServerOptions, "enableOptimization">,
+  config?: CompressionConfig,
+): unknown {
+  if (options?.enableOptimization === false) {
+    return body;
+  }
+
+  const cfg = { ...DEFAULT_CONFIG, ...config };
+
+  if (route === "/v1/chat/completions") {
+    return optimizeChatCompletionsBody(body, cfg);
+  }
+  if (route === "/v1/responses") {
+    return optimizeResponsesBody(body, cfg);
+  }
+  if (route === "/v1/messages") {
+    return optimizeMessagesBody(body, cfg);
+  }
+  return body;
+}
+
+function optimizeChatCompletionsBody(
+  body: unknown,
+  config: Required<CompressionConfig>,
+): unknown {
+  if (!isRecord(body)) {
+    return body;
+  }
+
+  const next: Record<string, unknown> = { ...body };
+  if (!Array.isArray(body.messages)) {
+    return next;
+  }
+
+  const messages = body.messages;
+  const totalMessages = messages.length;
+
+  // Merge user-provided exclude tools with defaults
+  const excludeTools = new Set([
+    ...DEFAULT_EXCLUDE_TOOLS,
+    ...config.exclude_tools,
+  ]);
+
+  // Detect analysis intent (protect_analysis_context)
+  const analysisIntent = config.protect_analysis_context
+    ? detectAnalysisIntent(messages)
+    : false;
+
+  // Determine message protection zones
+  const frozenCount = Math.min(config.frozen_message_count, totalMessages);
+  const recentStart = Math.max(0, totalMessages - config.protect_recent);
+
+  // Determine code protection zone (protect_recent_code)
+  const codeProtectionStart = Math.max(
+    0,
+    totalMessages - config.protect_recent_code,
+  );
+
+  next.messages = messages.map((message, index) => {
+    if (!isRecord(message)) {
+      return message;
+    }
+
+    // Zone 1: Frozen prefix (already cached by provider) - return verbatim
+    if (index < frozenCount) {
+      return message;
+    }
+
+    // Zone 2: Protected recent messages (active conversation) - return verbatim
+    if (index >= recentStart) {
+      return message;
+    }
+
+    // Zone 3: Compressible middle zone
+    const role = message.role;
+    const messageCopy: Record<string, unknown> = { ...message };
+    const content = message.content;
+
+    // Role-based compression control
+    if (role === "user" && !config.compress_user_messages) {
+      return message; // Skip user messages by default (Headroom coding agent mode)
+    }
+
+    if (role === "system" && !config.compress_system_messages) {
+      return message;
+    }
+
+    // Assistant messages: check compress_assistant_text_blocks (cache safety)
+    if (role === "assistant" && !config.compress_assistant_text_blocks) {
+      return message; // Preserve assistant content for cache hits (default)
+    }
+
+    // Detect tool name and check exclusion
+    const toolName = detectToolName(message);
+    if (toolName && isToolExcluded(toolName, excludeTools)) {
+      return message; // Skip excluded tools
+    }
+
+    // String content
+    if (typeof content === "string") {
+      // Check protect_recent_code: don't compress code in last N messages
+      if (config.protect_recent_code > 0 && index >= codeProtectionStart) {
+        if (isSourceCode(content)) {
+          return message; // Protect recent code
+        }
+      }
+
+      // Protection: Don't compress CODE when analysis intent detected
+      if (analysisIntent && isSourceCode(content)) {
+        return message; // Preserve code verbatim for analysis
+      }
+
+      messageCopy.content = compressText(content, config, toolName);
+      return messageCopy;
+    }
+
+    // Array content (OpenAI multi-part messages)
+    if (Array.isArray(content)) {
+      messageCopy.content = content.map((part) => {
+        if (!isRecord(part)) {
+          return part;
+        }
+        const partCopy: Record<string, unknown> = { ...part };
+        if (typeof part.text === "string") {
+          // Check protect_recent_code
+          if (config.protect_recent_code > 0 && index >= codeProtectionStart) {
+            if (isSourceCode(part.text)) {
+              return part;
+            }
+          }
+
+          // Protection: Don't compress CODE when analysis intent detected
+          if (analysisIntent && isSourceCode(part.text)) {
+            return part; // Preserve code verbatim for analysis
+          }
+
+          partCopy.text = compressText(part.text, config, toolName);
+        }
+        return partCopy;
+      });
+    }
+
+    return messageCopy;
+  });
+
+  return next;
+}
+
+function optimizeResponsesBody(
+  body: unknown,
+  config: Required<CompressionConfig>,
+): unknown {
+  if (!isRecord(body)) {
+    return body;
+  }
+
+  const next: Record<string, unknown> = { ...body };
+  const input = body.input;
+
+  const excludeTools = new Set([
+    ...DEFAULT_EXCLUDE_TOOLS,
+    ...config.exclude_tools,
+  ]);
+
+  // Single string input
+  if (typeof input === "string") {
+    next.input = compressText(input, config);
+    return next;
+  }
+
+  // Array input
+  if (!Array.isArray(input)) {
+    return next;
+  }
+
+  const totalItems = input.length;
+  const frozenCount = Math.min(config.frozen_message_count, totalItems);
+  const recentStart = Math.max(0, totalItems - config.protect_recent);
+
+  next.input = input.map((item, index) => {
+    // Frozen or recent zones - return verbatim
+    if (index < frozenCount || index >= recentStart) {
+      return item;
+    }
+
+    if (!isRecord(item)) {
+      return item;
+    }
+
+    const itemCopy: Record<string, unknown> = { ...item };
+    const toolName = detectToolName(item);
+
+    // Skip excluded tools
+    if (toolName && isToolExcluded(toolName, excludeTools)) {
+      return item;
+    }
+
+    // Compress text field
+    if (typeof item.text === "string") {
+      itemCopy.text = compressText(item.text, config, toolName);
+    }
+
+    // Compress content array
+    if (Array.isArray(item.content)) {
+      itemCopy.content = item.content.map((part) => {
+        if (!isRecord(part)) {
+          return part;
+        }
+        const partCopy: Record<string, unknown> = { ...part };
+        if (typeof part.text === "string") {
+          partCopy.text = compressText(part.text, config, toolName);
+        }
+        return partCopy;
+      });
+    }
+    return itemCopy;
+  });
+
+  return next;
+}
+
+function optimizeMessagesBody(
+  body: unknown,
+  config: Required<CompressionConfig>,
+): unknown {
+  if (!isRecord(body)) {
+    return body;
+  }
+
+  const next: Record<string, unknown> = { ...body };
+  if (!Array.isArray(body.messages)) {
+    return next;
+  }
+
+  const messages = body.messages;
+  const totalMessages = messages.length;
+  const frozenCount = Math.min(config.frozen_message_count, totalMessages);
+  const recentStart = Math.max(0, totalMessages - config.protect_recent);
+  const codeProtectionStart = Math.max(
+    0,
+    totalMessages - config.protect_recent_code,
+  );
+
+  const excludeTools = new Set([
+    ...DEFAULT_EXCLUDE_TOOLS,
+    ...config.exclude_tools,
+  ]);
+
+  // Detect analysis intent (protect_analysis_context)
+  const analysisIntent = config.protect_analysis_context
+    ? detectAnalysisIntent(messages)
+    : false;
+
+  next.messages = messages.map((message, index) => {
+    // Frozen or recent zones - return verbatim
+    if (index < frozenCount || index >= recentStart) {
+      return message;
+    }
+
+    if (!isRecord(message)) {
+      return message;
+    }
+
+    const role = message.role;
+    const messageCopy: Record<string, unknown> = { ...message };
+    const content = message.content;
+
+    // Role-based compression control
+    if (role === "user" && !config.compress_user_messages) {
+      return message;
+    }
+
+    if (role === "system" && !config.compress_system_messages) {
+      return message;
+    }
+
+    // Assistant messages: check compress_assistant_text_blocks (cache safety)
+    if (role === "assistant" && !config.compress_assistant_text_blocks) {
+      return message;
+    }
+
+    // Detect tool name and check exclusion
+    const toolName = detectToolName(message);
+    if (toolName && isToolExcluded(toolName, excludeTools)) {
+      return message;
+    }
+
+    // String content
+    if (typeof content === "string") {
+      // protect_recent_code
+      if (config.protect_recent_code > 0 && index >= codeProtectionStart) {
+        if (isSourceCode(content)) {
+          return message;
+        }
+      }
+
+      // Protection: Don't compress CODE when analysis intent detected
+      if (analysisIntent && isSourceCode(content)) {
+        return message; // Preserve code verbatim for analysis
+      }
+
+      messageCopy.content = compressText(content, config, toolName);
+      return messageCopy;
+    }
+
+    // Array content (Anthropic content blocks)
+    if (Array.isArray(content)) {
+      messageCopy.content = content.map((part) => {
+        if (!isRecord(part)) {
+          return part;
+        }
+
+        const partCopy: Record<string, unknown> = { ...part };
+        if (typeof part.text === "string") {
+          // protect_recent_code
+          if (config.protect_recent_code > 0 && index >= codeProtectionStart) {
+            if (isSourceCode(part.text)) {
+              return part;
+            }
+          }
+
+          // Protection: Don't compress CODE when analysis intent detected
+          if (analysisIntent && isSourceCode(part.text)) {
+            return part; // Preserve code verbatim for analysis
+          }
+
+          partCopy.text = compressText(part.text, config, toolName);
+        }
+        return partCopy;
+      });
+    }
+
+    return messageCopy;
+  });
+
+  return next;
+}
+
+/**
+ * Simple token estimation: ~4 characters per token (GPT-4 average)
+ */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Fast content hash for deduplication (FNV-1a 32-bit)
+ */
+function simpleHash(text: string): string {
+  let hash = 2166136261; // FNV offset basis
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619); // FNV prime
+  }
+  return (hash >>> 0).toString(36); // Convert to base36 string
+}
+
+function compactText(value: string): string {
+  // Aggressive Headroom-style compression
+  return (
+    value
+      // Normalize line endings
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      // Remove trailing whitespace from each line
+      .replace(/[ \t]+$/gm, "")
+      // Collapse tabs and multiple spaces to single space
+      .replace(/[ \t]{2,}/g, " ")
+      // Collapse excessive newlines (4+ → 2, 3 → 2)
+      .replace(/\n{3,}/g, "\n\n")
+      // Remove spaces around punctuation (natural language optimization)
+      .replace(/ ([,;:.!?)\]}])/g, "$1")
+      .replace(/([([{]) /g, "$1")
+      // Minify code blocks - dedent to minimum indentation
+      .replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
+        const lines = code.split("\n");
+        const nonEmptyLines = lines.filter((l: string) => l.trim().length > 0);
+        if (nonEmptyLines.length === 0) return match;
+
+        const minIndent = Math.min(
+          ...nonEmptyLines.map((l: string) => {
+            const leadingSpaces = l.match(/^[ \t]*/)?.[0].length || 0;
+            return leadingSpaces;
+          }),
+        );
+
+        const dedented = lines
+          .map((l: string) => (l.trim().length > 0 ? l.slice(minIndent) : ""))
+          .join("\n")
+          .trim();
+
+        return `\`\`\`${lang}\n${dedented}\n\`\`\``;
+      })
+      // Remove markdown link titles: [text](url "title") → [text](url)
+      .replace(/\[([^\]]+)\]\(([^)]+)\s+"[^"]*"\)/g, "[$1]($2)")
+      // Collapse markdown headers: ### Text → ###Text
+      .replace(/^(#{1,6})[ \t]+/gm, "$1")
+      // Remove empty list items
+      .replace(/^[-*+][ \t]*$/gm, "")
+      // Remove repeated blank lines in lists
+      .replace(/(\n[-*+][^\n]*)\n{2,}(?=[-*+])/g, "$1\n")
+      // Final trim
+      .trim()
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null;
+}

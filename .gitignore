@@ -1,0 +1,16 @@
+node_modules/
+dist/
+tests/**/*.js
+tests/**/*.js.map
+tests/**/*.d.ts
+
+*.log
+*.pid
+
+.env
+.env.*
+!.env.example
+
+.copilot-parity/
+coverage/
+.DS_Store
