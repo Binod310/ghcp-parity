@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   NullableNumber,
+  ModelTelemetrySummary,
   ParsedUpstreamUsage,
   RequestUsageTelemetry,
   TelemetrySummary,
@@ -129,6 +130,23 @@ export function buildTelemetrySummary(
       savedPercentCount > 0 ? savedPercentSum / savedPercentCount : 0,
     total_aiu_after: totalAiuAfter,
   };
+}
+
+export function buildModelTelemetrySummaries(
+  requests: RequestUsageTelemetry[],
+): ModelTelemetrySummary[] {
+  const requestsByModel = new Map<string, RequestUsageTelemetry[]>();
+  for (const request of requests) {
+    const records = requestsByModel.get(request.model) ?? [];
+    records.push(request);
+    requestsByModel.set(request.model, records);
+  }
+  return [...requestsByModel.entries()]
+    .map(([model, records]) => ({
+      model,
+      ...buildTelemetrySummary(records),
+    }))
+    .sort((left, right) => right.total_saved_tokens - left.total_saved_tokens);
 }
 
 function asNullableNumber(value: unknown): NullableNumber {

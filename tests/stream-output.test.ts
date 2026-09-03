@@ -41,4 +41,19 @@ describe("stream output", () => {
     counter.write('data: {"delta":"do');
     counter.end('ne"}\n\ndata: [DONE]\n\n');
   });
+
+  it("counts Anthropic content block deltas", (done) => {
+    let counted = 0;
+    const counter = createSseOutputCounter((tokens) => {
+      counted = tokens;
+    });
+    counter.on("end", () => {
+      assert.equal(counted, estimateOutputTokens("Claude reply"));
+      done();
+    });
+    counter.resume();
+    counter.end(
+      'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Claude reply"}}\n\n',
+    );
+  });
 });

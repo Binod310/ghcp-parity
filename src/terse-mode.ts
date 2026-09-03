@@ -4,9 +4,24 @@
  * optimizer.ts, which reduces input tokens by compacting request content.
  */
 
-export type TerseLevel = "off" | "lite" | "full" | "ultra";
+export type TerseLevel =
+  | "off"
+  | "lite"
+  | "full"
+  | "ultra"
+  | "wenyan-lite"
+  | "wenyan-full"
+  | "wenyan-ultra";
 
-const VALID_LEVELS = new Set<TerseLevel>(["off", "lite", "full", "ultra"]);
+const VALID_LEVELS = new Set<TerseLevel>([
+  "off",
+  "lite",
+  "full",
+  "ultra",
+  "wenyan-lite",
+  "wenyan-full",
+  "wenyan-ultra",
+]);
 
 const TERSE_INSTRUCTIONS: Record<Exclude<TerseLevel, "off">, string> = {
   lite:
@@ -25,6 +40,17 @@ const TERSE_INSTRUCTIONS: Record<Exclude<TerseLevel, "off">, string> = {
     "code, identifiers, error strings, and numbers. Do not invent abbreviations. " +
     "Use normal prose for security warnings, irreversible actions, or ambiguous " +
     "multi-step instructions.",
+  "wenyan-lite":
+    "以用戶語言作半文言簡答。去贅語與模糊語，保留技術準確性、否定、" +
+    "原樣程式碼、識別碼、錯誤字串與數字。安全警告、不可逆操作、含糊多步" +
+    "驟說明用清楚現代語。",
+  "wenyan-full":
+    "以用戶語言作簡潔文言答。保留技術準確性、否定、原樣程式碼、識別碼、" +
+    "錯誤字串與數字。安全警告、不可逆操作、含糊多步驟說明用清楚現代語。",
+  "wenyan-ultra":
+    "以用戶語言作極簡文言答。每事一述。保留技術準確性、否定、原樣程式碼、" +
+    "識別碼、錯誤字串與數字。安全警告、不可逆操作、含糊多步驟說明用清楚" +
+    "現代語。",
 };
 
 export function resolveTerseLevel(

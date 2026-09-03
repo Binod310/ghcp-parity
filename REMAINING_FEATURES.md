@@ -84,13 +84,46 @@ After thorough review of `headroom/headroom/transforms/content_router.py`, here 
 
 ## Decision
 
-**Implement compress_assistant_text_blocks**: Simple, aligns with Headroom defaults
-**Consider min_ratio thresholds**: Useful optimization
-**Skip min_section_tokens**: Already have message-level threshold
+**Implemented compress_assistant_text_blocks**: Available through
+`COPILOT_PARITY_COMPRESS_ASSISTANT=1`; default remains disabled for cache safety.
+**Implemented min_ratio thresholds**: Applied by `compressText`; runtime values
+available through `COPILOT_PARITY_MIN_RATIO_RELAXED` and
+`COPILOT_PARITY_MIN_RATIO_AGGRESSIVE`, default `1.0`.
+**Implemented min_section_tokens**: Applied per paragraph section by `compressText`
+with default `20`; small sections remain unchanged inside large messages.
+**Implemented runtime size thresholds**: `COPILOT_PARITY_MIN_TOKENS`,
+`COPILOT_PARITY_MIN_CHARS`, and `COPILOT_PARITY_MIN_SECTION_TOKENS` override
+defaults without source changes.
+**Implemented message protection controls**: `COPILOT_PARITY_FROZEN_MESSAGES`
+and `COPILOT_PARITY_PROTECT_RECENT` preserve configured message zones.
+**Implemented recent-code protection control**: `COPILOT_PARITY_PROTECT_RECENT_CODE`
+preserves source code in recent messages; default `4`.
+**Implemented error-output protection controls**: `COPILOT_PARITY_PROTECT_ERRORS`
+and `COPILOT_PARITY_ERROR_MAX_CHARS` preserve small errors by default.
+**Implemented XML-tag compression control**: `COPILOT_PARITY_COMPRESS_TAGGED=1`
+compresses tagged content while preserving markers; default remains protected.
+**Implemented custom tool exclusions**: `COPILOT_PARITY_EXCLUDE_TOOLS` adds
+runtime-protected tool names to built-in exclusions.
+**Implemented role compression controls**: `COPILOT_PARITY_COMPRESS_USER` and
+`COPILOT_PARITY_COMPRESS_SYSTEM` independently control role compression.
+**Implemented lossless compaction control**: `COPILOT_PARITY_LOSSLESS=0`
+disables reversible log, grep, and diff folding.
+**Implemented lossless-only mode**: `COPILOT_PARITY_LOSSLESS_ONLY=1` skips
+lossy JSON and whitespace stages.
+**Implemented strict accuracy guard**: `COPILOT_PARITY_STRICT_ACCURACY=1`
+requires at least 20% savings before accepting compression.
+**Implemented code-aware import control**: `COPILOT_PARITY_CODE_IMPORT_DEDUP=0`
+disables exact duplicate import removal.
+**Implemented per-tool compression profiles**: `COPILOT_PARITY_TOOL_PROFILES`
+provides case-insensitive JSON overrides for tool-specific compression behavior.
+**Implemented analysis-context protection**: `COPILOT_PARITY_PROTECT_ANALYSIS`
+preserves code for review/debug/fix prompts by default.
+**Implemented shell-tool detection**: `COPILOT_PARITY_BASH_TOOLS` configures
+custom shell names for lossless log compaction.
 **Skip everything else**: Infrastructure requirements or overkill for proxy
 
 ## Current Status
 
-**Implemented**: 17 core features
-**Easy adds**: 1-2 more (compress_assistant_text_blocks, min_ratio thresholds)
-**Final count**: ~18-19 features (93%+ of applicable features)
+**Implemented**: 20 applicable core features
+**Deferred**: CCR, relevance scoring, cross-turn deduplication, and external
+compressors because they require additional infrastructure.

@@ -8,6 +8,7 @@ import {
 } from "./auth";
 import {
   buildTelemetrySummary,
+  buildModelTelemetrySummaries,
   buildUsageTelemetry,
   computeSavedTokens,
   estimateTokensFromJson,
@@ -71,6 +72,10 @@ export function createServer(customOptions?: Partial<ServerOptions>) {
 
   app.get("/stats/summary", (_req, res) => {
     res.json({ summary: buildTelemetrySummary(recentRequests) });
+  });
+
+  app.get("/stats/models", (_req, res) => {
+    res.json({ models: buildModelTelemetrySummaries(recentRequests) });
   });
 
   app.get("/stats/latest", (_req, res) => {
@@ -1306,12 +1311,129 @@ function resolveServerOptions(
     enableOptimization:
       customOptions?.enableOptimization ??
       process.env.COPILOT_PARITY_ENABLE_OPTIMIZATION !== "0",
+    compressUserMessages:
+      customOptions?.compressUserMessages ??
+      process.env.COPILOT_PARITY_COMPRESS_USER !== "0",
+    compressSystemMessages:
+      customOptions?.compressSystemMessages ??
+      process.env.COPILOT_PARITY_COMPRESS_SYSTEM !== "0",
+    compressAssistantTextBlocks:
+      customOptions?.compressAssistantTextBlocks ??
+      process.env.COPILOT_PARITY_COMPRESS_ASSISTANT === "1",
+    minCompressionRatioRelaxed:
+      customOptions?.minCompressionRatioRelaxed ??
+      parseRatioEnvironment(process.env.COPILOT_PARITY_MIN_RATIO_RELAXED, 1),
+    minCompressionRatioAggressive:
+      customOptions?.minCompressionRatioAggressive ??
+      parseRatioEnvironment(process.env.COPILOT_PARITY_MIN_RATIO_AGGRESSIVE, 1),
+    minTokensToCompress:
+      customOptions?.minTokensToCompress ??
+      parsePositiveEnvironment(process.env.COPILOT_PARITY_MIN_TOKENS, 250),
+    minCharsForBlockCompression:
+      customOptions?.minCharsForBlockCompression ??
+      parsePositiveEnvironment(process.env.COPILOT_PARITY_MIN_CHARS, 500),
+    minSectionTokens:
+      customOptions?.minSectionTokens ??
+      parsePositiveEnvironment(
+        process.env.COPILOT_PARITY_MIN_SECTION_TOKENS,
+        20,
+      ),
+    frozenMessageCount:
+      customOptions?.frozenMessageCount ??
+      parseNonNegativeEnvironment(
+        process.env.COPILOT_PARITY_FROZEN_MESSAGES,
+        0,
+      ),
+    protectRecentMessages:
+      customOptions?.protectRecentMessages ??
+      parseNonNegativeEnvironment(process.env.COPILOT_PARITY_PROTECT_RECENT, 0),
+    protectRecentCode:
+      customOptions?.protectRecentCode ??
+      parseNonNegativeEnvironment(
+        process.env.COPILOT_PARITY_PROTECT_RECENT_CODE,
+        4,
+      ),
+    protectErrorOutputs:
+      customOptions?.protectErrorOutputs ??
+      process.env.COPILOT_PARITY_PROTECT_ERRORS !== "0",
+    errorProtectionMaxChars:
+      customOptions?.errorProtectionMaxChars ??
+      parsePositiveEnvironment(
+        process.env.COPILOT_PARITY_ERROR_MAX_CHARS,
+        8000,
+      ),
+    compressTaggedContent:
+      customOptions?.compressTaggedContent ??
+      process.env.COPILOT_PARITY_COMPRESS_TAGGED === "1",
+    excludeTools:
+      customOptions?.excludeTools ??
+      parseListEnvironment(process.env.COPILOT_PARITY_EXCLUDE_TOOLS),
+    losslessCompaction:
+      customOptions?.losslessCompaction ??
+      process.env.COPILOT_PARITY_LOSSLESS !== "0",
+    losslessOnly:
+      customOptions?.losslessOnly ??
+      process.env.COPILOT_PARITY_LOSSLESS_ONLY === "1",
+    strictAccuracyGuard:
+      customOptions?.strictAccuracyGuard ??
+      process.env.COPILOT_PARITY_STRICT_ACCURACY === "1",
+    protectAnalysisContext:
+      customOptions?.protectAnalysisContext ??
+      process.env.COPILOT_PARITY_PROTECT_ANALYSIS !== "0",
+    codeAwareImportDeduplication:
+      customOptions?.codeAwareImportDeduplication ??
+      process.env.COPILOT_PARITY_CODE_IMPORT_DEDUP !== "0",
+    toolProfiles:
+      customOptions?.toolProfiles ??
+      parseToolProfiles(process.env.COPILOT_PARITY_TOOL_PROFILES),
+    bashToolNames:
+      customOptions?.bashToolNames ??
+      parseListEnvironment(process.env.COPILOT_PARITY_BASH_TOOLS),
     defaultTerseLevel:
       customOptions?.defaultTerseLevel ??
       (process.env
         .COPILOT_PARITY_TERSE_MODE as ServerOptions["defaultTerseLevel"]) ??
       "off",
   };
+}
+
+function parseRatioEnvironment(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 1
+    ? parsed
+    : fallback;
+}
+
+function parsePositiveEnvironment(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseNonNegativeEnvironment(
+  value: string | undefined,
+  fallback: number,
+) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseListEnvironment(value: string | undefined) {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseToolProfiles(value: string | undefined) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 async function sendUpstreamGetRequest(input: {

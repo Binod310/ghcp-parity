@@ -40,6 +40,18 @@ describe("terse mode", () => {
 
   it("accepts valid header levels and rejects invalid values", () => {
     assert.equal(resolveTerseLevel("ultra", "off"), "ultra");
+    assert.equal(resolveTerseLevel("wenyan-ultra", "off"), "wenyan-ultra");
     assert.equal(resolveTerseLevel("invalid", "full"), "full");
+  });
+
+  it("injects Wenyan instructions", () => {
+    const transformed = applyTerseMode(
+      "/v1/chat/completions",
+      { messages: [{ role: "user", content: "Hello" }] },
+      "wenyan-full",
+    ) as { messages: Array<{ role: string; content: string }> };
+
+    assert.equal(transformed.messages[0].role, "system");
+    assert.match(transformed.messages[0].content, /文言/);
   });
 });

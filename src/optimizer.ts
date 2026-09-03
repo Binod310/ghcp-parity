@@ -6,6 +6,7 @@ import {
   isLogOutput,
   isDiffOutput,
 } from "./lossless-compaction";
+import { compactDuplicateImports } from "./code-compaction";
 
 /**
  * Default tools to exclude from compression (from Headroom's DEFAULT_EXCLUDE_TOOLS).
@@ -69,6 +70,8 @@ export interface CompressionConfig {
    * (ANSI strip, run collapse, repeated block folding)
    */
   lossless_compaction?: boolean;
+  /** Stop after lossless transforms; skip JSON and whitespace compaction. */
+  lossless_only?: boolean;
   /**
    * Detect 'analyze'/'review' intent and protect code from compression.
    * When enabled, looks for keywords like "analyze", "review", "debug", "fix"
@@ -138,6 +141,20 @@ export interface CompressionConfig {
    * Typically same as or lower than min_ratio_relaxed (more aggressive under pressure).
    */
   min_ratio_aggressive?: number;
+  /** Remove exact duplicate static imports from large JavaScript or TypeScript blocks. */
+  code_aware_import_deduplication?: boolean;
+  /** Per-tool overrides for compression safety and thresholds. */
+  tool_profiles?: Record<string, ToolCompressionProfile>;
+}
+
+export interface ToolCompressionProfile {
+  protect_error_outputs?: boolean;
+  compress_tagged_content?: boolean;
+  lossless_compaction?: boolean;
+  min_tokens_to_compress?: number;
+  min_chars_for_block_compression?: number;
+  min_section_tokens?: number;
+  code_aware_import_deduplication?: boolean;
 }
 
 const DEFAULT_CONFIG: Required<CompressionConfig> = {
@@ -150,6 +167,7 @@ const DEFAULT_CONFIG: Required<CompressionConfig> = {
   exclude_tools: [], // No extra exclusions (DEFAULT_EXCLUDE_TOOLS always applied)
   accuracy_guard: undefined as any, // Normal mode
   lossless_compaction: true, // Enable by default (safe + effective)
+  lossless_only: false,
   protect_analysis_context: true, // Headroom default for coding agents
   protect_error_outputs: true, // Preserve error content (Headroom default)
   error_protection_max_chars: 8000, // ~2K tokens (Headroom default)
@@ -160,6 +178,8 @@ const DEFAULT_CONFIG: Required<CompressionConfig> = {
   min_section_tokens: 20, // Headroom default for section-level threshold
   min_ratio_relaxed: 1.0, // Accept any compression (no savings floor)
   min_ratio_aggressive: 1.0, // Same under pressure (Headroom default)
+  code_aware_import_deduplication: true,
+  tool_profiles: {},
 };
 
 // Deduplication cache: content hash → compressed version
@@ -369,9 +389,17 @@ function protectTags(
   compressTaggedContent: boolean,
 ): {
   cleanedText: string;
-  protectedBlocks: Array<{ placeholder: string; original: string }>;
+  protectedBlocks: Array<{
+    placeholder: string;
+    original: string;
+    closing?: string;
+  }>;
 } {
-  const protectedBlocks: Array<{ placeholder: string; original: string }> = [];
+  const protectedBlocks: Array<{
+    placeholder: string;
+    original: string;
+    closing?: string;
+  }> = [];
   let cleanedText = text;
   let placeholderIndex = 0;
 
@@ -435,11 +463,12 @@ function protectTags(
         );
         protectedBlocks.push({
           placeholder,
-          original: tagStart + tagEnd,
+          original: tagStart,
+          closing: tagEnd,
         });
         cleanedText = cleanedText.replace(
           fullMatch,
-          placeholder + content + placeholder,
+          placeholder + content + `${placeholder}_END`,
         );
       } else {
         // Self-closing tag
@@ -461,11 +490,18 @@ function protectTags(
  */
 function restoreTags(
   text: string,
-  protectedBlocks: Array<{ placeholder: string; original: string }>,
+  protectedBlocks: Array<{
+    placeholder: string;
+    original: string;
+    closing?: string;
+  }>,
 ): string {
   let restored = text;
   for (const block of protectedBlocks) {
     restored = restored.replace(block.placeholder, block.original);
+    if (block.closing) {
+      restored = restored.replace(`${block.placeholder}_END`, block.closing);
+    }
   }
   return restored;
 }
@@ -478,24 +514,62 @@ function compressText(
   config: Required<CompressionConfig>,
   toolName?: string,
 ): string {
-  // Check minimum character threshold (Headroom's min_chars_for_block_compression)
-  if (text.length < config.min_chars_for_block_compression) {
-    return text;
+  const toolConfig = resolveToolConfig(config, toolName);
+  // Basic whitespace normalization is safe for short plain-text messages.
+  const normalizedText = compactText(text);
+  if (text.length < toolConfig.min_chars_for_block_compression) {
+    return normalizedText;
   }
 
-  // Check minimum token threshold (message-level)
   const estimatedTokens = estimateTokens(text);
-  if (estimatedTokens < config.min_tokens_to_compress) {
+  if (estimatedTokens < toolConfig.min_tokens_to_compress) {
     return text;
   }
 
-  // Check minimum section tokens (block-level, more granular)
-  if (estimatedTokens < config.min_section_tokens) {
-    return text;
+  const sections = text.split(/(\n{2,})/);
+  if (sections.length > 1) {
+    return sections
+      .map((section) =>
+        /^\n+$/.test(section) ||
+        estimateTokens(section) < toolConfig.min_section_tokens
+          ? section
+          : compressTextBlock(section, toolConfig, toolName),
+      )
+      .join("");
   }
 
+  return compressTextBlock(text, toolConfig, toolName);
+}
+
+function resolveToolConfig(
+  config: Required<CompressionConfig>,
+  toolName?: string,
+): Required<CompressionConfig> {
+  if (!toolName) return config;
+  const profile = Object.entries(config.tool_profiles).find(
+    ([name]) => name.toLowerCase() === toolName.toLowerCase(),
+  )?.[1];
+  return profile ? { ...config, ...profile } : config;
+}
+
+function compressTextBlock(
+  text: string,
+  config: Required<CompressionConfig>,
+  toolName?: string,
+): string {
   // Check deduplication cache
-  const contentHash = simpleHash(text);
+  const contentHash = JSON.stringify({
+    text,
+    compress_tagged_content: config.compress_tagged_content,
+    protect_error_outputs: config.protect_error_outputs,
+    error_protection_max_chars: config.error_protection_max_chars,
+    code_aware_import_deduplication: config.code_aware_import_deduplication,
+    min_section_tokens: config.min_section_tokens,
+    min_ratio_relaxed: config.min_ratio_relaxed,
+    accuracy_guard: config.accuracy_guard,
+    lossless_compaction: config.lossless_compaction,
+    lossless_only: config.lossless_only,
+  });
   if (contentCache.has(contentHash)) {
     return contentCache.get(contentHash)!;
   }
@@ -510,8 +584,19 @@ function compressText(
 
   let compressed = text;
 
+  if (config.code_aware_import_deduplication && isSourceCode(text)) {
+    const compactedCode = compactDuplicateImports(text);
+    if (compactedCode.length < compressed.length) {
+      compressed = compactedCode;
+    }
+  }
+
   // Step 0: Protect custom XML tags if needed (Headroom's tag_protector)
-  let protectedBlocks: Array<{ placeholder: string; original: string }> = [];
+  let protectedBlocks: Array<{
+    placeholder: string;
+    original: string;
+    closing?: string;
+  }> = [];
   if (text.includes("<") && text.includes(">")) {
     const tagResult = protectTags(text, config.compress_tagged_content);
     compressed = tagResult.cleanedText;
@@ -521,6 +606,7 @@ function compressText(
   // Step 1: Apply lossless compaction for logs/grep/diffs
   if (config.lossless_compaction) {
     if (
+      isBashTool(toolName, config.bash_tool_names) ||
       isGrepOutput(compressed) ||
       isLogOutput(compressed) ||
       isDiffOutput(compressed)
@@ -529,6 +615,12 @@ function compressText(
       if (lossless.length < compressed.length) {
         compressed = lossless;
       }
+    }
+    if (config.lossless_only) {
+      const losslessResult =
+        compressed.length < text.length ? compressed : text;
+      contentCache.set(contentHash, losslessResult);
+      return losslessResult;
     }
   }
 
@@ -575,25 +667,161 @@ function compressText(
 export function optimizePayload(
   route: string,
   body: unknown,
-  options?: Pick<ServerOptions, "enableOptimization">,
+  options?: Pick<ServerOptions, "enableOptimization"> &
+    Partial<
+      Pick<
+        ServerOptions,
+        | "compressAssistantTextBlocks"
+        | "compressUserMessages"
+        | "compressSystemMessages"
+        | "minCompressionRatioRelaxed"
+        | "minCompressionRatioAggressive"
+        | "minTokensToCompress"
+        | "minCharsForBlockCompression"
+        | "minSectionTokens"
+        | "frozenMessageCount"
+        | "protectRecentMessages"
+        | "protectRecentCode"
+        | "protectErrorOutputs"
+        | "errorProtectionMaxChars"
+        | "compressTaggedContent"
+        | "excludeTools"
+        | "losslessCompaction"
+        | "losslessOnly"
+        | "strictAccuracyGuard"
+        | "protectAnalysisContext"
+        | "codeAwareImportDeduplication"
+        | "toolProfiles"
+        | "bashToolNames"
+      >
+    >,
   config?: CompressionConfig,
 ): unknown {
   if (options?.enableOptimization === false) {
     return body;
   }
 
-  const cfg = { ...DEFAULT_CONFIG, ...config };
+  const cfg = {
+    ...DEFAULT_CONFIG,
+    ...(options?.compressAssistantTextBlocks === true
+      ? { compress_assistant_text_blocks: true }
+      : {}),
+    ...(options?.compressUserMessages !== undefined
+      ? { compress_user_messages: options.compressUserMessages }
+      : {}),
+    ...(options?.compressSystemMessages !== undefined
+      ? { compress_system_messages: options.compressSystemMessages }
+      : {}),
+    ...(options?.minCompressionRatioRelaxed !== undefined
+      ? { min_ratio_relaxed: options.minCompressionRatioRelaxed }
+      : {}),
+    ...(options?.minCompressionRatioAggressive !== undefined
+      ? { min_ratio_aggressive: options.minCompressionRatioAggressive }
+      : {}),
+    ...(options?.minTokensToCompress !== undefined
+      ? { min_tokens_to_compress: options.minTokensToCompress }
+      : {}),
+    ...(options?.minCharsForBlockCompression !== undefined
+      ? { min_chars_for_block_compression: options.minCharsForBlockCompression }
+      : {}),
+    ...(options?.minSectionTokens !== undefined
+      ? { min_section_tokens: options.minSectionTokens }
+      : {}),
+    ...(options?.frozenMessageCount !== undefined
+      ? { frozen_message_count: options.frozenMessageCount }
+      : {}),
+    ...(options?.protectRecentMessages !== undefined
+      ? { protect_recent: options.protectRecentMessages }
+      : {}),
+    ...(options?.protectRecentCode !== undefined
+      ? { protect_recent_code: options.protectRecentCode }
+      : {}),
+    ...(options?.protectErrorOutputs !== undefined
+      ? { protect_error_outputs: options.protectErrorOutputs }
+      : {}),
+    ...(options?.errorProtectionMaxChars !== undefined
+      ? { error_protection_max_chars: options.errorProtectionMaxChars }
+      : {}),
+    ...(options?.compressTaggedContent !== undefined
+      ? { compress_tagged_content: options.compressTaggedContent }
+      : {}),
+    ...(options?.excludeTools !== undefined
+      ? { exclude_tools: options.excludeTools }
+      : {}),
+    ...(options?.losslessCompaction !== undefined
+      ? { lossless_compaction: options.losslessCompaction }
+      : {}),
+    ...(options?.losslessOnly !== undefined
+      ? { lossless_only: options.losslessOnly }
+      : {}),
+    ...(options?.strictAccuracyGuard === true
+      ? { accuracy_guard: "strict" as const }
+      : {}),
+    ...(options?.protectAnalysisContext !== undefined
+      ? { protect_analysis_context: options.protectAnalysisContext }
+      : {}),
+    ...(options?.codeAwareImportDeduplication !== undefined
+      ? {
+          code_aware_import_deduplication: options.codeAwareImportDeduplication,
+        }
+      : {}),
+    ...(options?.toolProfiles !== undefined
+      ? { tool_profiles: options.toolProfiles }
+      : {}),
+    ...(options?.bashToolNames !== undefined
+      ? { bash_tool_names: options.bashToolNames }
+      : {}),
+    ...config,
+  };
+  const deduplicatedBody = deduplicateToolSchemas(body);
 
   if (route === "/v1/chat/completions") {
-    return optimizeChatCompletionsBody(body, cfg);
+    return optimizeChatCompletionsBody(deduplicatedBody, cfg);
   }
   if (route === "/v1/responses") {
-    return optimizeResponsesBody(body, cfg);
+    return optimizeResponsesBody(deduplicatedBody, cfg);
   }
   if (route === "/v1/messages") {
-    return optimizeMessagesBody(body, cfg);
+    return optimizeMessagesBody(deduplicatedBody, cfg);
   }
-  return body;
+  return deduplicatedBody;
+}
+
+function deduplicateToolSchemas(body: unknown): unknown {
+  if (!isRecord(body)) {
+    return body;
+  }
+
+  const next: Record<string, unknown> = { ...body };
+  for (const key of ["tools", "functions"]) {
+    const tools = body[key];
+    if (!Array.isArray(tools)) {
+      continue;
+    }
+    const seen = new Set<string>();
+    next[key] = tools.filter((tool) => {
+      const fingerprint = canonicalJson(tool);
+      if (seen.has(fingerprint)) {
+        return false;
+      }
+      seen.add(fingerprint);
+      return true;
+    });
+  }
+  return next;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function optimizeChatCompletionsBody(
@@ -624,7 +852,10 @@ function optimizeChatCompletionsBody(
     : false;
 
   // Determine message protection zones
-  const frozenCount = Math.min(config.frozen_message_count, totalMessages);
+  const frozenCount = Math.max(
+    Math.min(config.frozen_message_count, totalMessages),
+    cacheAnchoredPrefixLength(messages),
+  );
   const recentStart = Math.max(0, totalMessages - config.protect_recent);
 
   // Determine code protection zone (protect_recent_code)
@@ -751,7 +982,10 @@ function optimizeResponsesBody(
   }
 
   const totalItems = input.length;
-  const frozenCount = Math.min(config.frozen_message_count, totalItems);
+  const frozenCount = Math.max(
+    Math.min(config.frozen_message_count, totalItems),
+    cacheAnchoredPrefixLength(input),
+  );
   const recentStart = Math.max(0, totalItems - config.protect_recent);
 
   next.input = input.map((item, index) => {
@@ -811,7 +1045,10 @@ function optimizeMessagesBody(
 
   const messages = body.messages;
   const totalMessages = messages.length;
-  const frozenCount = Math.min(config.frozen_message_count, totalMessages);
+  const frozenCount = Math.max(
+    Math.min(config.frozen_message_count, totalMessages),
+    cacheAnchoredPrefixLength(messages),
+  );
   const recentStart = Math.max(0, totalMessages - config.protect_recent);
   const codeProtectionStart = Math.max(
     0,
@@ -911,6 +1148,29 @@ function optimizeMessagesBody(
   });
 
   return next;
+}
+
+function cacheAnchoredPrefixLength(items: unknown[]): number {
+  let lastAnchor = -1;
+  for (let index = 0; index < items.length; index += 1) {
+    if (containsCacheControl(items[index])) {
+      lastAnchor = index;
+    }
+  }
+  return lastAnchor + 1;
+}
+
+function containsCacheControl(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(containsCacheControl);
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "cache_control")) {
+    return true;
+  }
+  return Object.values(value).some(containsCacheControl);
 }
 
 /**

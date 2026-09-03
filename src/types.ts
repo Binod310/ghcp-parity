@@ -34,7 +34,36 @@ export interface ServerOptions {
   timeoutMs: number;
   maxRecentRequests: number;
   enableOptimization: boolean;
-  defaultTerseLevel: "off" | "lite" | "full" | "ultra";
+  compressUserMessages: boolean;
+  compressSystemMessages: boolean;
+  compressAssistantTextBlocks: boolean;
+  minCompressionRatioRelaxed: number;
+  minCompressionRatioAggressive: number;
+  minTokensToCompress: number;
+  minCharsForBlockCompression: number;
+  minSectionTokens: number;
+  frozenMessageCount: number;
+  protectRecentMessages: number;
+  protectRecentCode: number;
+  protectErrorOutputs: boolean;
+  errorProtectionMaxChars: number;
+  compressTaggedContent: boolean;
+  excludeTools: string[];
+  losslessCompaction: boolean;
+  losslessOnly: boolean;
+  strictAccuracyGuard: boolean;
+  protectAnalysisContext: boolean;
+  codeAwareImportDeduplication: boolean;
+  toolProfiles: Record<string, import("./optimizer").ToolCompressionProfile>;
+  bashToolNames: string[];
+  defaultTerseLevel:
+    | "off"
+    | "lite"
+    | "full"
+    | "ultra"
+    | "wenyan-lite"
+    | "wenyan-full"
+    | "wenyan-ultra";
 }
 
 export interface AuthStatusView {
@@ -59,4 +88,8 @@ export interface TelemetrySummary {
   total_output_tokens: number;
   average_saved_percent: number;
   total_aiu_after: number;
+}
+
+export interface ModelTelemetrySummary extends TelemetrySummary {
+  model: string;
 }

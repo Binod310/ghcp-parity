@@ -140,6 +140,28 @@ export function foldRepeatedBlocks(text: string): string {
   return out.join("\n");
 }
 
+export function foldRepeatedParagraphs(text: string): string {
+  const paragraphs = text.split(/\n{2,}/);
+  if (paragraphs.length < 2) {
+    return text;
+  }
+
+  const seen = new Map<string, number>();
+  const compacted = paragraphs.map((paragraph, index) => {
+    const normalized = paragraph.trim();
+    if (normalized.length < 200) {
+      return paragraph;
+    }
+    const originalIndex = seen.get(normalized);
+    if (originalIndex !== undefined) {
+      return `[Repeated paragraph ${index + 1}; identical to paragraph ${originalIndex + 1}]`;
+    }
+    seen.set(normalized, index);
+    return paragraph;
+  });
+  return compacted.join("\n\n");
+}
+
 function rememberLine(
   positions: Map<string, number[]>,
   line: string,
@@ -187,6 +209,11 @@ export function compactLossless(text: string): string {
   const folded = foldRepeatedBlocks(result);
   if (folded.length < result.length) {
     result = folded;
+  }
+
+  const paragraphs = foldRepeatedParagraphs(result);
+  if (paragraphs.length < result.length) {
+    result = paragraphs;
   }
 
   // Strip diff index lines

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildTelemetrySummary,
+  buildModelTelemetrySummaries,
   buildUsageTelemetry,
   computeSavedTokens,
   parseUpstreamUsage,
@@ -131,5 +132,50 @@ describe("usage telemetry schema", () => {
     assert.equal(loadTelemetry(10)[0]?.saved_tokens, 10);
     assert.doesNotMatch(fs.readFileSync(filePath, "utf8"), /content|Bearer/);
     delete process.env.COPILOT_PARITY_TELEMETRY_FILE;
+  });
+
+  it("groups durable savings by model", () => {
+    const records = [
+      {
+        request_id: "gpt",
+        model: "gpt-5.6",
+        before_tokens: 100,
+        after_tokens: 80,
+        saved_tokens: 20,
+        saved_percent: 20,
+        output_tokens: 10,
+        aiu_before: null,
+        aiu_after: null,
+        aiu_saved: null,
+        timestamp: new Date().toISOString(),
+        route: "/responses",
+        status: 200,
+        measurement: "estimated" as const,
+      },
+      {
+        request_id: "claude",
+        model: "claude-sonnet-5",
+        before_tokens: 100,
+        after_tokens: 95,
+        saved_tokens: 5,
+        saved_percent: 5,
+        output_tokens: 20,
+        aiu_before: null,
+        aiu_after: null,
+        aiu_saved: null,
+        timestamp: new Date().toISOString(),
+        route: "/v1/messages",
+        status: 200,
+        measurement: "estimated" as const,
+      },
+    ];
+
+    const summaries = buildModelTelemetrySummaries(records);
+    assert.deepEqual(
+      summaries.map((summary) => summary.model),
+      ["gpt-5.6", "claude-sonnet-5"],
+    );
+    assert.equal(summaries[0]?.total_saved_tokens, 20);
+    assert.equal(summaries[1]?.total_output_tokens, 20);
   });
 });

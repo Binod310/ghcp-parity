@@ -64,6 +64,15 @@ function extractPayloadText(payload: Record<string, unknown>): string[] {
     return chatText;
   }
 
-  const text = payload.delta ?? payload.text;
-  return typeof text === "string" ? [text] : [];
+  const delta = payload.delta;
+  if (typeof delta === "string") {
+    return [delta];
+  }
+  if (typeof delta === "object" && delta !== null) {
+    const text = (delta as Record<string, unknown>).text;
+    if (typeof text === "string") {
+      return [text];
+    }
+  }
+  return typeof payload.text === "string" ? [payload.text] : [];
 }

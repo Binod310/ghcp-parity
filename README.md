@@ -1,3 +1,6 @@
+| Strict accuracy guard | Accepts compression only when it reaches at least 20% savings, protecting detail in accuracy-sensitive workflows. | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts) | [optimizer.test.ts](tests/optimizer.test.ts) |
+| Recent code protection | Keeps source code in recent messages byte-for-byte unchanged; configurable for cache and analysis safety. | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts) | [optimizer.test.ts](tests/optimizer.test.ts) |
+
 # Copilot Parity Local
 
 Local proxy for VS Code GitHub Copilot. It routes native Copilot requests through
@@ -6,18 +9,41 @@ records per-request token estimates. No duplicate model appears in VS Code picke
 
 ## Implemented Features
 
-| Feature                | Behavior                                                                                                                               | Source                                                                                                                         | Tests / verification                                            |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| Native VS Code routing | Routes Copilot Chat, agent, completions, model discovery, and native request paths through local proxy without changing `model`.       | [server.ts](src/server.ts)                                                                                                     | Select models in VS Code; inspect `/stats/latest`.              |
-| Safe VS Code lifecycle | Adds/removes only marker-owned JSONC settings; supports macOS, Windows, Linux, custom settings files, and refuses unmanaged overrides. | [vscode-config.ts](src/vscode-config.ts)                                                                                       | [vscode-config.test.ts](tests/vscode-config.test.ts)            |
-| Copilot OAuth          | Device login, short-lived API-token exchange, expiry refresh, retry after upstream `401`, and Headroom-auth import.                    | [auth.ts](src/auth.ts)                                                                                                         | [auth.test.ts](tests/auth.test.ts)                              |
-| Enterprise routing     | Persists GitHub's validated advertised Business/Enterprise API endpoint; `COPILOT_BASE_URL` explicitly overrides it.                   | [auth.ts](src/auth.ts), [server.ts](src/server.ts)                                                                             | `curl -sS http://127.0.0.1:8796/health`                         |
-| Input optimization     | Compacts eligible repeated/log/JSON text while protecting configured sensitive context and exact tool content.                         | [optimizer.ts](src/optimizer.ts), [lossless-compaction.ts](src/lossless-compaction.ts), [json-crusher.ts](src/json-crusher.ts) | `curl -sS http://127.0.0.1:8796/stats/summary`                  |
-| Terse output mode      | Injects `lite`, `full`, or `ultra` concise-output instructions without changing selected model.                                        | [terse-mode.ts](src/terse-mode.ts)                                                                                             | [terse-mode.test.ts](tests/terse-mode.test.ts)                  |
-| Request telemetry      | Records route, model, status, input savings, and completed-stream output-token estimates. Persists only telemetry fields, never prompts, completions, or credentials. | [telemetry.ts](src/telemetry.ts), [telemetry-store.ts](src/telemetry-store.ts), [stream-output.ts](src/stream-output.ts), [server.ts](src/server.ts) | [telemetry.test.ts](tests/telemetry.test.ts), [stream-output.test.ts](tests/stream-output.test.ts), `/stats/requests` |
-| Corporate TLS          | Adds configured corporate CA bundle to Node's public trust roots for proxy and auth traffic.                                           | [upstream-agent.ts](src/upstream-agent.ts)                                                                                     | `curl -sS http://127.0.0.1:8796/health`                         |
+| Feature                     | Behavior                                                                                                                                                              | Source                                                                                                                                               | Tests / verification                                                                                                  |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Native VS Code routing      | Routes Copilot Chat, agent, completions, model discovery, and native request paths through local proxy without changing `model`.                                      | [server.ts](src/server.ts)                                                                                                                           | Select models in VS Code; inspect `/stats/latest`.                                                                    |
+| Safe VS Code lifecycle      | Adds/removes only marker-owned JSONC settings; supports macOS, Windows, Linux, custom settings files, and refuses unmanaged overrides.                                | [vscode-config.ts](src/vscode-config.ts)                                                                                                             | [vscode-config.test.ts](tests/vscode-config.test.ts)                                                                  |
+| Copilot OAuth               | Device login, short-lived API-token exchange, expiry refresh, retry after upstream `401`, and Headroom-auth import.                                                   | [auth.ts](src/auth.ts)                                                                                                                               | [auth.test.ts](tests/auth.test.ts)                                                                                    |
+| Enterprise routing          | Persists GitHub's validated advertised Business/Enterprise API endpoint; `COPILOT_BASE_URL` explicitly overrides it.                                                  | [auth.ts](src/auth.ts), [server.ts](src/server.ts)                                                                                                   | `curl -sS http://127.0.0.1:8796/health`                                                                               |
+| Input optimization          | Compacts eligible repeated/log/JSON text while protecting configured sensitive context and exact tool content.                                                        | [optimizer.ts](src/optimizer.ts), [lossless-compaction.ts](src/lossless-compaction.ts), [json-crusher.ts](src/json-crusher.ts)                       | `curl -sS http://127.0.0.1:8796/stats/summary`                                                                        |
+| Terse output mode           | Injects `lite`, `full`, `ultra`, and Wenyan levels without changing selected model.                                                                                   | [terse-mode.ts](src/terse-mode.ts), [types.ts](src/types.ts)                                                                                         | [terse-mode.test.ts](tests/terse-mode.test.ts), [docs/caveman-mode.md](docs/caveman-mode.md)                          |
+| Request telemetry           | Records route, model, status, input savings, and completed-stream output-token estimates. Persists only telemetry fields, never prompts, completions, or credentials. | [telemetry.ts](src/telemetry.ts), [telemetry-store.ts](src/telemetry-store.ts), [stream-output.ts](src/stream-output.ts), [server.ts](src/server.ts) | [telemetry.test.ts](tests/telemetry.test.ts), [stream-output.test.ts](tests/stream-output.test.ts), `/stats/requests` |
+| Corporate TLS               | Adds configured corporate CA bundle to Node's public trust roots for proxy and auth traffic.                                                                          | [upstream-agent.ts](src/upstream-agent.ts)                                                                                                           | `curl -sS http://127.0.0.1:8796/health`                                                                               |
+| Assistant compression       | Preserves assistant text by default for cache safety; enables deterministic compression with `COPILOT_PARITY_COMPRESS_ASSISTANT=1`.                                   | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Compression ratio gates     | Rejects compression that does not beat configured ratio thresholds; defaults accept any shrink.                                                                       | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Section-level threshold     | Splits long text at paragraph boundaries; preserves sections below `min_section_tokens` while compressing eligible sections.                                          | [optimizer.ts](src/optimizer.ts)                                                                                                                     | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Runtime size thresholds     | Configures minimum token, character, and section sizes through environment variables without code changes.                                                            | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Message protection          | Freezes cached prefix messages and protects recent active messages through runtime settings.                                                                          | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Error-output protection     | Preserves small error outputs by default; supports disabling protection or changing maximum protected size.                                                           | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| XML-tag protection          | Preserves tagged blocks by default; optionally compresses tag content while keeping opening and closing markers.                                                      | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Role compression controls   | Enables or disables user and system message compression independently through environment settings.                                                                   | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Lossless compaction         | Enables or disables reversible log, grep, and diff compaction independently from other compression stages.                                                            | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Lossless-only mode          | Runs only reversible log, grep, and diff transforms; skips JSON crushing and whitespace normalization.                                                                | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Code import deduplication   | Removes exact duplicate JavaScript/TypeScript imports; configurable for exact source preservation.                                                                    | [code-compaction.ts](src/code-compaction.ts), [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts)                                           | [code-compaction.test.ts](tests/code-compaction.test.ts), [optimizer.test.ts](tests/optimizer.test.ts)                |
+| Tool compression profiles   | Applies per-tool overrides for lossless mode, tag/error protection, and compression thresholds.                                                                       | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Analysis-context protection | Preserves code when recent user prompts request review, debugging, fixing, or analysis.                                                                               | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
+| Shell-tool detection        | Applies lossless log compaction to configured shell tool outputs, including custom tool names.                                                                        | [optimizer.ts](src/optimizer.ts), [server.ts](src/server.ts), [types.ts](src/types.ts)                                                               | [optimizer.test.ts](tests/optimizer.test.ts)                                                                          |
 
 ## Requirements
+
+Exclude additional tools from compression:
+
+```bash
+COPILOT_PARITY_EXCLUDE_TOOLS=database_snapshot,custom_search
+```
+
+Built-in exclusions remain active. Tool names match case-insensitively,
+including supported underscore/camel-case variants.
 
 - Node.js 20 or later
 - VS Code with GitHub Copilot enabled and signed in
@@ -116,14 +142,151 @@ model ID, code, identifiers, error text, negation, and numbers:
 
 ```bash
 env \
-  COPILOT_PARITY_TERSE_MODE=full \
+  COPILOT_PARITY_TERSE_MODE=ultra \
   COPILOT_CA_BUNDLE="$COPILOT_CA_BUNDLE" \
   NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS" \
   npm run dev -- proxy --port 8796
 ```
 
-Supported terse levels: `off` (default), `lite`, `full`, `ultra`. Stop proxy with
-`Ctrl+C`. While stopped, configured Copilot requests fail rather than bypass parity.
+Supported terse levels: `off` (default), `lite`, `full`, `ultra`, `wenyan-lite`,
+`wenyan-full`, `wenyan-ultra`. Per-request override: header
+`x-copilot-parity-terse`. Full caveman mode contract: [docs/caveman-mode.md](docs/caveman-mode.md).
+Stop proxy with `Ctrl+C`. While stopped, configured Copilot requests fail rather
+than bypass parity.
+
+Assistant text remains unchanged by default because changing cached assistant
+bytes can reduce provider prefix-cache hits. Enable this trade-off explicitly:
+
+```bash
+COPILOT_PARITY_COMPRESS_ASSISTANT=1
+```
+
+Set compression acceptance thresholds from `0` exclusive to `1` inclusive:
+
+```bash
+COPILOT_PARITY_MIN_RATIO_RELAXED=0.85
+COPILOT_PARITY_MIN_RATIO_AGGRESSIVE=0.70
+```
+
+Compression is accepted only when `compressed_size / original_size` is below
+the selected threshold. Invalid values fall back to `1`.
+
+Runtime size thresholds:
+
+```bash
+COPILOT_PARITY_MIN_TOKENS=250
+COPILOT_PARITY_MIN_CHARS=500
+COPILOT_PARITY_MIN_SECTION_TOKENS=20
+```
+
+Invalid or non-positive values use defaults.
+
+Message protection controls:
+
+```bash
+COPILOT_PARITY_FROZEN_MESSAGES=0
+COPILOT_PARITY_PROTECT_RECENT=0
+```
+
+Frozen messages and recent messages remain unchanged. Cache-anchored prefixes
+stay protected regardless of these values.
+
+Protect source code in last `N` messages:
+
+```bash
+COPILOT_PARITY_PROTECT_RECENT_CODE=4
+```
+
+Error-output protection controls:
+
+```bash
+COPILOT_PARITY_PROTECT_ERRORS=1
+COPILOT_PARITY_ERROR_MAX_CHARS=8000
+```
+
+Protection is enabled by default. Set `COPILOT_PARITY_PROTECT_ERRORS=0` to allow
+eligible error logs to compress.
+
+XML-tag compression:
+
+```bash
+COPILOT_PARITY_COMPRESS_TAGGED=1
+```
+
+Default preserves complete tagged blocks byte-for-byte. Opt-in changes only tag
+content; tag markers remain intact.
+
+Role compression controls:
+
+```bash
+COPILOT_PARITY_COMPRESS_USER=1
+COPILOT_PARITY_COMPRESS_SYSTEM=1
+```
+
+Both are enabled by default. Set either variable to `0` to preserve that role's
+content unchanged.
+
+Lossless compaction control:
+
+```bash
+COPILOT_PARITY_LOSSLESS=1
+```
+
+Enabled by default. Set to `0` to disable reversible log, grep, and diff folding.
+
+Lossless-only mode:
+
+```bash
+COPILOT_PARITY_LOSSLESS_ONLY=1
+```
+
+Useful when exact non-lossless content must remain unchanged.
+
+Code-aware import deduplication:
+
+```bash
+COPILOT_PARITY_CODE_IMPORT_DEDUP=1
+```
+
+Enabled by default. Set to `0` to preserve duplicate imports exactly.
+
+Per-tool compression profiles use JSON at proxy startup:
+
+```bash
+COPILOT_PARITY_TOOL_PROFILES='{"database_snapshot":{"lossless_compaction":false,"protect_error_outputs":true}}'
+```
+
+Supported fields include `lossless_compaction`, `compress_tagged_content`,
+`protect_error_outputs`, `error_protection_max_chars`,
+`min_tokens_to_compress`, `min_chars_for_block_compression`,
+`min_section_tokens`, and `code_aware_import_deduplication`.
+
+Analysis-context protection:
+
+```bash
+COPILOT_PARITY_PROTECT_ANALYSIS=1
+```
+
+Enabled by default. Set to `0` to allow code compression during analysis prompts.
+
+Configure shell-tool names:
+
+```bash
+COPILOT_PARITY_BASH_TOOLS=bash,shell,terminal_exec
+```
+
+Configured shell outputs enter the lossless log-compaction path.
+
+Strict accuracy guard:
+
+```bash
+COPILOT_PARITY_STRICT_ACCURACY=1
+```
+
+Disabled by default. When enabled, compression is rejected unless it saves at
+least 20%.
+
+Default: `4`. Set `0` to disable this code-specific protection.
 
 For Business and Enterprise accounts, parity uses the validated API endpoint
 advertised during token exchange, such as `https://api.business.githubcopilot.com`.
