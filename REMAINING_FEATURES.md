@@ -60,13 +60,15 @@ After thorough review of `headroom/headroom/transforms/content_router.py`, here 
 
 10. **prefer_code_aware_for_code / force_kompress_all** (bool)
     - Routing preferences for compressor selection
-   - Implemented through runtime stage and pipeline controls.
+
+- Implemented through runtime stage and pipeline controls.
 
 ### Structural Compressor Config Overrides
 
 11. **search_compressor / log_compressor / diff_compressor / text_crusher / smart_crusher**
     - Per-compressor configuration objects
-   - Implemented through per-stage runtime controls where applicable.
+
+- Implemented through per-stage runtime controls where applicable.
 
 ### Summary
 
