@@ -1,10 +1,13 @@
 # Feature Completeness Analysis
 
+All proxy-owned token optimization features listed below are implemented and
+tested. This file tracks compatibility boundaries, not an unfinished backlog.
+
 ## Remaining Features in Headroom ContentRouterConfig NOT Implemented
 
 After thorough review of `headroom/headroom/transforms/content_router.py`, here are the remaining features we haven't implemented:
 
-### Simple Features (Could Implement)
+### Previously Planned Features
 
 1. **compress_assistant_text_blocks** (bool, default: False)
    - **Purpose**: Compress assistant text blocks (cache-safety trade-off)
@@ -28,42 +31,42 @@ After thorough review of `headroom/headroom/transforms/content_router.py`, here 
    - **Implementation**: Check ratio after compression, revert if below threshold
    - **Priority**: MEDIUM (optimization for marginal cases)
 
-### Complex Features (Not Implementing)
+### Client-Dependent Features
 
 4. **relevance_split** (bool, default: True)
    - Requires embeddings/BM25 for relevance scoring
    - Segments LOG/SEARCH output into records, scores against prompt
-   - **Not implementing**: Too complex for lightweight proxy
+   - Implemented as lexical relevance-aware compression; embeddings remain out of scope.
 
 5. **ccr_enabled / ccr_inject_marker** (bool, default: True)
    - Compress-Cache-Retrieve with reversible markers
-   - **Not implementing**: Requires retrieval infrastructure
+   - Implemented as opt-in local CCR markers and retrieval endpoints; native VS Code tool-loop retrieval remains unsupported.
 
 6. **enable_cross_turn_dedup** (bool, default: False)
    - Cross-turn verbatim deduplication with in-context pointers
-   - **Not implementing**: Requires session state tracking (proxy is stateless)
+   - Implemented within one request; cross-request session state remains disabled.
 
 7. **lossless / lossless_then_lossy** (bool, default: False)
    - Mode switching between lossless-only and lossless+lossy
-   - **Not implementing**: We apply both together (more aggressive)
+   - Implemented as `lossless` and `lossless_then_lossy` modes.
 
 8. **tool_profiles** (dict, default: None)
    - Per-tool CompressionProfile configuration
-   - **Not implementing**: Overkill for HTTP proxy
+   - Implemented through `COPILOT_PARITY_TOOL_PROFILES`.
 
 9. **active_external_compressors** (list, default: None)
    - Dynamic compressor registry for external plugins
-   - **Not implementing**: Not needed for fixed compression pipeline
+   - Implemented through explicit module loading and shrink-only execution.
 
 10. **prefer_code_aware_for_code / force_kompress_all** (bool)
     - Routing preferences for compressor selection
-    - **Not implementing**: We don't have multiple compressor backends
+   - Implemented through runtime stage and pipeline controls.
 
 ### Structural Compressor Config Overrides
 
 11. **search_compressor / log_compressor / diff_compressor / text_crusher / smart_crusher**
     - Per-compressor configuration objects
-    - **Not implementing**: We have fixed config in our implementations
+   - Implemented through per-stage runtime controls where applicable.
 
 ### Summary
 
@@ -73,14 +76,10 @@ After thorough review of `headroom/headroom/transforms/content_router.py`, here 
 - min_section_tokens (sub-message threshold)
 - min_ratio thresholds (acceptance gates)
 
-**Not implementing** (8 features):
+**Proxy-owned features**: implemented.
 
-- Complex features requiring infrastructure (relevance_split, CCR, cross-turn-dedup)
-- Mode switches (lossless modes)
-- Per-tool profiles
-- External compressor registry
-- Compressor routing preferences
-- Per-compressor config overrides
+**Client-dependent**: native VS Code CCR tool-loop retrieval requires client-side
+support that this transparent proxy cannot add safely.
 
 ## Decision
 
@@ -120,10 +119,46 @@ provides case-insensitive JSON overrides for tool-specific compression behavior.
 preserves code for review/debug/fix prompts by default.
 **Implemented shell-tool detection**: `COPILOT_PARITY_BASH_TOOLS` configures
 custom shell names for lossless log compaction.
-**Skip everything else**: Infrastructure requirements or overkill for proxy
+**Implemented cross-turn deduplication**: `COPILOT_PARITY_CROSS_TURN_DEDUP=1`
+replaces repeated long text across Chat, Responses, and Anthropic inputs with
+explicit in-context references.
+**Implemented relevance-aware compression**: `COPILOT_PARITY_RELEVANCE_SPLIT=1`
+preserves sections matching latest user query across Chat, Responses, and
+Anthropic inputs while compressing unrelated sections.
+**Implemented external compressor registry**: `COPILOT_PARITY_EXTERNAL_COMPRESSORS`
+activates registered shrink-only compressors with failure isolation.
+**Implemented compression pipeline modes**: `COPILOT_PARITY_COMPRESSION_MODE`
+selects `lossless` or `lossless_then_lossy` processing.
+**Implemented external module loading**: `COPILOT_PARITY_EXTERNAL_COMPRESSOR_MODULES`
+loads explicit `{ name, compress }` modules with startup failure isolation.
+**Implemented opt-in CCR markers**: `COPILOT_PARITY_CCR=1` stores large content
+locally and exposes `GET /ccr/retrieve/:id`; native VS Code tool-loop integration
+remains unsupported.
+**Implemented bounded CCR retention**: `COPILOT_PARITY_CCR_TTL_MS` and
+`COPILOT_PARITY_CCR_MAX_ENTRIES` prevent unbounded marker storage.
+**Implemented CCR threshold control**: `COPILOT_PARITY_CCR_MIN_CHARS` controls
+minimum content size for marker replacement; default `10000`.
+**Implemented CCR marker control**: `COPILOT_PARITY_CCR_INJECT_MARKER=0`
+disables marker injection while retaining normal compression.
+**Implemented JSON compaction control**: `COPILOT_PARITY_JSON_COMPACTION=0`
+disables JSON text crushing independently.
+**Implemented output-type controls**: `COPILOT_PARITY_LOG_COMPACTION`,
+`COPILOT_PARITY_SEARCH_COMPACTION`, and `COPILOT_PARITY_DIFF_COMPACTION`
+independently control lossless output transforms.
+**Implemented runtime config diagnostics**: `GET /stats/config` reports active
+non-sensitive optimization settings without credentials or request content.
+**Implemented CCR lifecycle cleanup**: delete one marker or clear all CCR entries
+through local management endpoints.
+**Implemented management endpoint auth**: `COPILOT_PARITY_MANAGEMENT_TOKEN`
+protects diagnostics and CCR management routes when configured.
+**Implemented CCR status diagnostics**: `GET /ccr/status` reports count and
+retention limits without exposing stored content.
+**Skip unsafe behavior**: no proxy-side changes to native VS Code tool execution.
 
 ## Current Status
 
-**Implemented**: 20 applicable core features
-**Deferred**: CCR, relevance scoring, cross-turn deduplication, and external
-compressors because they require additional infrastructure.
+**Implemented**: all applicable proxy-owned features, including CCR, relevance
+splitting, cross-turn deduplication, tool profiles, external modules, pipeline
+modes, stage controls, diagnostics, and management security.
+**Deferred**: native VS Code CCR tool-loop integration because it requires
+client-side retrieval support.

@@ -14,17 +14,29 @@ import {
   estimateTokensFromJson,
   parseUpstreamUsage,
 } from "./telemetry";
-import { optimizePayload } from "./optimizer";
+import { loadExternalCompressors, optimizePayload } from "./optimizer";
 import { applyTerseMode, resolveTerseLevel } from "./terse-mode";
 import { appendTelemetry, loadTelemetry } from "./telemetry-store";
 import { createSseOutputCounter } from "./stream-output";
 import { createUpstreamFetchAgent } from "./upstream-agent";
+import {
+  clearAllCcrContent,
+  configureCcrRetention,
+  deleteCcrContent,
+  getCcrStatus,
+  retrieveCcrContent,
+} from "./ccr";
 import type { RequestUsageTelemetry, ServerOptions } from "./types";
 
 const upstreamFetchAgent = createUpstreamFetchAgent();
 
 export function createServer(customOptions?: Partial<ServerOptions>) {
   const options = resolveServerOptions(customOptions);
+  loadExternalCompressors(options.externalCompressorModules);
+  configureCcrRetention({
+    ttlMs: options.ccrTtlMs,
+    maxEntries: options.ccrMaxEntries,
+  });
   const recentRequests = loadTelemetry(options.maxRecentRequests);
   const app = express();
 
@@ -78,8 +90,75 @@ export function createServer(customOptions?: Partial<ServerOptions>) {
     res.json({ models: buildModelTelemetrySummaries(recentRequests) });
   });
 
+  app.get("/stats/config", (_req, res) => {
+    if (!authorizeManagementRequest(_req, res)) return;
+    res.json({
+      optimization: {
+        enabled: options.enableOptimization,
+        terse_level: options.defaultTerseLevel,
+        compression_mode: options.compressionMode,
+        assistant_compression: options.compressAssistantTextBlocks,
+        user_compression: options.compressUserMessages,
+        system_compression: options.compressSystemMessages,
+        json_compaction: options.jsonCompaction,
+        lossless_compaction: options.losslessCompaction,
+        lossless_only: options.losslessOnly,
+        strict_accuracy: options.strictAccuracyGuard,
+        relevance_split: options.relevanceSplit,
+        cross_turn_dedup: options.enableCrossTurnDedup,
+        ccr: options.ccrEnabled,
+        ccr_inject_marker: options.ccrInjectMarker,
+        ccr_min_chars: options.ccrMinChars,
+        ccr_ttl_ms: options.ccrTtlMs,
+        ccr_max_entries: options.ccrMaxEntries,
+        min_tokens: options.minTokensToCompress,
+        min_chars: options.minCharsForBlockCompression,
+        min_section_tokens: options.minSectionTokens,
+        frozen_messages: options.frozenMessageCount,
+        protect_recent: options.protectRecentMessages,
+        protect_recent_code: options.protectRecentCode,
+        protect_errors: options.protectErrorOutputs,
+        error_max_chars: options.errorProtectionMaxChars,
+        tagged_content: options.compressTaggedContent,
+        excluded_tools: options.excludeTools,
+        shell_tools: options.bashToolNames,
+        external_compressors: options.activeExternalCompressors,
+      },
+    });
+  });
+
   app.get("/stats/latest", (_req, res) => {
     res.json({ request: recentRequests[recentRequests.length - 1] ?? null });
+  });
+
+  app.get("/ccr/retrieve/:id", (req, res) => {
+    if (!authorizeManagementRequest(req, res)) return;
+    const content = retrieveCcrContent(req.params.id);
+    if (content === undefined) {
+      res.status(404).json({ error: "CCR content not found" });
+      return;
+    }
+    res.type("text/plain").send(content);
+  });
+
+  app.delete("/ccr/retrieve/:id", (req, res) => {
+    if (!authorizeManagementRequest(req, res)) return;
+    if (!deleteCcrContent(req.params.id)) {
+      res.status(404).json({ error: "CCR content not found" });
+      return;
+    }
+    res.status(204).end();
+  });
+
+  app.post("/ccr/clear", (_req, res) => {
+    if (!authorizeManagementRequest(_req, res)) return;
+    clearAllCcrContent();
+    res.status(204).end();
+  });
+
+  app.get("/ccr/status", (req, res) => {
+    if (!authorizeManagementRequest(req, res)) return;
+    res.json({ ccr: getCcrStatus() });
   });
 
   app.get("/debug/parity", (_req, res) => {
@@ -1374,6 +1453,34 @@ function resolveServerOptions(
     losslessOnly:
       customOptions?.losslessOnly ??
       process.env.COPILOT_PARITY_LOSSLESS_ONLY === "1",
+    compressionMode:
+      customOptions?.compressionMode ??
+      (process.env.COPILOT_PARITY_COMPRESSION_MODE === "lossless"
+        ? "lossless"
+        : "lossless_then_lossy"),
+    enableCrossTurnDedup:
+      customOptions?.enableCrossTurnDedup ??
+      process.env.COPILOT_PARITY_CROSS_TURN_DEDUP === "1",
+    ccrEnabled:
+      customOptions?.ccrEnabled ?? process.env.COPILOT_PARITY_CCR === "1",
+    ccrInjectMarker:
+      customOptions?.ccrInjectMarker ??
+      process.env.COPILOT_PARITY_CCR_INJECT_MARKER !== "0",
+    ccrMinChars:
+      customOptions?.ccrMinChars ??
+      parsePositiveEnvironment(process.env.COPILOT_PARITY_CCR_MIN_CHARS, 10000),
+    ccrTtlMs:
+      customOptions?.ccrTtlMs ??
+      parsePositiveEnvironment(process.env.COPILOT_PARITY_CCR_TTL_MS, 3600000),
+    ccrMaxEntries:
+      customOptions?.ccrMaxEntries ??
+      parsePositiveEnvironment(
+        process.env.COPILOT_PARITY_CCR_MAX_ENTRIES,
+        1000,
+      ),
+    relevanceSplit:
+      customOptions?.relevanceSplit ??
+      process.env.COPILOT_PARITY_RELEVANCE_SPLIT === "1",
     strictAccuracyGuard:
       customOptions?.strictAccuracyGuard ??
       process.env.COPILOT_PARITY_STRICT_ACCURACY === "1",
@@ -1389,6 +1496,26 @@ function resolveServerOptions(
     bashToolNames:
       customOptions?.bashToolNames ??
       parseListEnvironment(process.env.COPILOT_PARITY_BASH_TOOLS),
+    activeExternalCompressors:
+      customOptions?.activeExternalCompressors ??
+      parseListEnvironment(process.env.COPILOT_PARITY_EXTERNAL_COMPRESSORS),
+    logCompaction:
+      customOptions?.logCompaction ??
+      process.env.COPILOT_PARITY_LOG_COMPACTION !== "0",
+    searchCompaction:
+      customOptions?.searchCompaction ??
+      process.env.COPILOT_PARITY_SEARCH_COMPACTION !== "0",
+    diffCompaction:
+      customOptions?.diffCompaction ??
+      process.env.COPILOT_PARITY_DIFF_COMPACTION !== "0",
+    jsonCompaction:
+      customOptions?.jsonCompaction ??
+      process.env.COPILOT_PARITY_JSON_COMPACTION !== "0",
+    externalCompressorModules:
+      customOptions?.externalCompressorModules ??
+      parseListEnvironment(
+        process.env.COPILOT_PARITY_EXTERNAL_COMPRESSOR_MODULES,
+      ),
     defaultTerseLevel:
       customOptions?.defaultTerseLevel ??
       (process.env
@@ -1434,6 +1561,15 @@ function parseToolProfiles(value: string | undefined) {
   } catch {
     return {};
   }
+}
+
+function authorizeManagementRequest(req: Request, res: express.Response) {
+  const expected = process.env.COPILOT_PARITY_MANAGEMENT_TOKEN?.trim();
+  if (!expected || req.header("authorization") === `Bearer ${expected}`) {
+    return true;
+  }
+  res.status(401).json({ error: "Management authorization required" });
+  return false;
 }
 
 async function sendUpstreamGetRequest(input: {

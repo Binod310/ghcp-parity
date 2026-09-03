@@ -51,11 +51,25 @@ export interface ServerOptions {
   excludeTools: string[];
   losslessCompaction: boolean;
   losslessOnly: boolean;
+  compressionMode: "lossless" | "lossless_then_lossy";
+  enableCrossTurnDedup: boolean;
+  ccrEnabled: boolean;
+  ccrInjectMarker: boolean;
+  ccrMinChars: number;
+  ccrTtlMs: number;
+  ccrMaxEntries: number;
+  relevanceSplit: boolean;
   strictAccuracyGuard: boolean;
   protectAnalysisContext: boolean;
   codeAwareImportDeduplication: boolean;
   toolProfiles: Record<string, import("./optimizer").ToolCompressionProfile>;
   bashToolNames: string[];
+  activeExternalCompressors: string[];
+  logCompaction: boolean;
+  searchCompaction: boolean;
+  diffCompaction: boolean;
+  jsonCompaction: boolean;
+  externalCompressorModules: string[];
   defaultTerseLevel:
     | "off"
     | "lite"

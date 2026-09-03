@@ -1,6 +1,17 @@
 import assert from "node:assert";
 import { describe, it } from "mocha";
-import { optimizePayload } from "../src/optimizer";
+import {
+  loadExternalCompressors,
+  optimizePayload,
+  registerExternalCompressor,
+} from "../src/optimizer";
+import {
+  clearCcrContent,
+  configureCcrRetention,
+  deleteCcrContent,
+  retrieveCcrContent,
+  storeCcrContent,
+} from "../src/ccr";
 
 describe("optimizer", () => {
   it("compacts chat message text", () => {
@@ -416,6 +427,125 @@ describe("optimizer", () => {
     assert.ok(!optimized.messages[0].content.includes("\u001b[31m"));
   });
 
+  it("creates a retrievable CCR marker only when enabled", () => {
+    clearCcrContent();
+    const content = "CCR original content.\n".repeat(600);
+    const input = {
+      messages: [
+        { role: "user", content },
+        { role: "user", content: "Continue" },
+      ],
+    };
+    const optimized = optimizePayload("/v1/chat/completions", input, {
+      enableOptimization: true,
+      ccrEnabled: true,
+      minTokensToCompress: 1,
+      minCharsForBlockCompression: 1,
+      minSectionTokens: 1,
+      protectRecentCode: 0,
+    }) as any;
+    const marker = optimized.messages[0].content as string;
+    const id = marker.match(/\[CCR:(ccr_\d+)\]/)?.[1];
+
+    assert.ok(id);
+    assert.equal(retrieveCcrContent(id), content);
+  });
+
+  it("supports a custom CCR activation threshold", () => {
+    clearCcrContent();
+    const content = "Short CCR threshold content.\n".repeat(20);
+    const optimized = optimizePayload(
+      "/v1/chat/completions",
+      {
+        messages: [
+          { role: "user", content },
+          { role: "user", content: "Continue" },
+        ],
+      },
+      {
+        enableOptimization: true,
+        ccrEnabled: true,
+        ccrMinChars: 100,
+        minTokensToCompress: 1,
+        minCharsForBlockCompression: 1,
+        minSectionTokens: 1,
+        protectRecentCode: 0,
+      },
+    ) as any;
+
+    assert.match(optimized.messages[0].content, /\[CCR:ccr_\d+\]/);
+  });
+
+  it("supports disabling CCR marker injection", () => {
+    clearCcrContent();
+    const content = "CCR marker-disabled content.\n".repeat(600);
+    const optimized = optimizePayload(
+      "/v1/chat/completions",
+      {
+        messages: [
+          { role: "user", content },
+          { role: "user", content: "Continue" },
+        ],
+      },
+      {
+        enableOptimization: true,
+        ccrEnabled: true,
+        ccrInjectMarker: false,
+        ccrMinChars: 100,
+        minTokensToCompress: 1,
+        minCharsForBlockCompression: 1,
+        minSectionTokens: 1,
+        protectRecentCode: 0,
+      },
+    ) as any;
+
+    assert.ok(!optimized.messages[0].content.includes("[CCR:"));
+    assert.ok(optimized.messages[0].content.length < content.length);
+  });
+
+  it("evicts oldest CCR entries at configured capacity", () => {
+    clearCcrContent();
+    configureCcrRetention({ ttlMs: 60000, maxEntries: 1 });
+    const firstId = storeCcrContent("first");
+    const secondId = storeCcrContent("second");
+    assert.equal(retrieveCcrContent(firstId), undefined);
+    assert.equal(retrieveCcrContent(secondId), "second");
+    configureCcrRetention({ ttlMs: 3600000, maxEntries: 1000 });
+  });
+
+  it("deletes individual CCR entries", () => {
+    clearCcrContent();
+    const id = storeCcrContent("delete me");
+    assert.equal(deleteCcrContent(id), true);
+    assert.equal(retrieveCcrContent(id), undefined);
+    assert.equal(deleteCcrContent(id), false);
+  });
+
+  it("supports explicit lossless compression mode", () => {
+    const input = {
+      messages: [
+        {
+          role: "user",
+          content: Array.from(
+            { length: 10 },
+            (_, index) => `\u001b[31mINFO\u001b[0m unique line ${index}\n`,
+          ).join(""),
+        },
+        { role: "user", content: "Continue" },
+      ],
+    };
+    const optimized = optimizePayload("/v1/chat/completions", input, {
+      enableOptimization: true,
+      compressionMode: "lossless",
+      minTokensToCompress: 1,
+      minCharsForBlockCompression: 1,
+      minSectionTokens: 1,
+      protectRecentCode: 0,
+    }) as any;
+
+    assert.ok(!optimized.messages[0].content.includes("\u001b[31m"));
+  });
+
   it("requires meaningful savings in strict accuracy mode", () => {
     const content = Array.from(
       { length: 100 },
@@ -535,5 +665,175 @@ describe("optimizer", () => {
     }) as any;
 
     assert.ok(optimized.messages[0].content.length < output.length);
+  });
+
+  it("deduplicates repeated long content only when enabled", () => {
+    const repeated = "Repeated context block.\n".repeat(40);
+    const input = {
+      messages: [
+        { role: "user", content: repeated },
+        { role: "user", content: repeated },
+      ],
+    };
+    const optimized = optimizePayload("/v1/chat/completions", input, {
+      enableOptimization: true,
+      enableCrossTurnDedup: true,
+      minTokensToCompress: 1,
+      minCharsForBlockCompression: 1,
+      minSectionTokens: 1,
+      protectRecentCode: 0,
+      losslessCompaction: false,
+    }) as any;
+
+    assert.match(
+      optimized.messages[1].content,
+      /Repeated content appears earlier/,
+    );
+  });
+
+  it("preserves relevant sections when relevance splitting is enabled", () => {
+    const relevant = "Database connection pooling configuration.\n".repeat(30);
+    const unrelated = "Unrelated deployment history details.\n".repeat(30);
+    const input = {
+      messages: [
+        { role: "user", content: `${relevant}\n\n${unrelated}` },
+        { role: "user", content: "Explain database pooling." },
+      ],
+    };
+    const optimized = optimizePayload("/v1/chat/completions", input, {
+      enableOptimization: true,
+      relevanceSplit: true,
+      minTokensToCompress: 1,
+      minCharsForBlockCompression: 1,
+      minSectionTokens: 1,
+      protectRecentCode: 0,
+      losslessCompaction: false,
+    }) as any;
+
+    assert.match(optimized.messages[0].content, /Database connection pooling/);
+    assert.ok(
+      optimized.messages[0].content.length < input.messages[0].content.length,
+    );
+  });
+
+  it("deduplicates repeated Responses input items", () => {
+    const repeated = "Responses repeated context.\n".repeat(40);
+    const optimized = optimizePayload(
+      "/v1/responses",
+      { input: [{ text: repeated }, { text: repeated }] },
+      {
+        enableOptimization: true,
+        enableCrossTurnDedup: true,
+        minTokensToCompress: 1,
+        minCharsForBlockCompression: 1,
+        minSectionTokens: 1,
+      },
+    ) as any;
+
+    assert.match(optimized.input[1].text, /Repeated content appears earlier/);
+  });
+
+  it("runs active external compressors shrink-only and isolates failures", () => {
+    registerExternalCompressor("test_shrink", (text) => text.replace(/ /g, ""));
+    registerExternalCompressor("test_throw", () => {
+      throw new Error("plugin failure");
+    });
+    const input = {
+      messages: [
+        { role: "user", content: "External plugin content.\n".repeat(30) },
+        { role: "user", content: "Continue" },
+      ],
+    };
+    const optimized = optimizePayload("/v1/chat/completions", input, {
+      enableOptimization: true,
+      activeExternalCompressors: ["test_shrink", "test_throw"],
+      minTokensToCompress: 1,
+      minCharsForBlockCompression: 1,
+      minSectionTokens: 1,
+      protectRecentCode: 0,
+      losslessCompaction: false,
+    }) as any;
+
+    assert.ok(
+      optimized.messages[0].content.length < input.messages[0].content.length,
+    );
+  });
+
+  it("preserves relevant Responses sections", () => {
+    const relevant = "Database pooling details.\n".repeat(30);
+    const unrelated = "Unrelated release notes.\n".repeat(30);
+    const optimized = optimizePayload(
+      "/v1/responses",
+      {
+        input: [
+          { text: `${relevant}\n\n${unrelated}` },
+          { role: "user", content: "Explain database pooling." },
+        ],
+      },
+      {
+        enableOptimization: true,
+        relevanceSplit: true,
+        minTokensToCompress: 1,
+        minCharsForBlockCompression: 1,
+        minSectionTokens: 1,
+      },
+    ) as any;
+
+    assert.match(optimized.input[0].text, /Database pooling details/);
+    assert.ok(
+      optimized.input[0].text.length < (relevant + "\n\n" + unrelated).length,
+    );
+  });
+
+  it("loads external compressor modules by explicit path", () => {
+    const loaded = loadExternalCompressors([
+      require.resolve("./fixtures/external-compressor.cjs"),
+      "/missing/external-compressor.cjs",
+    ]);
+    assert.deepEqual(loaded, ["fixture_shrink"]);
+  });
+
+  it("supports disabling JSON text compaction", () => {
+    const jsonText = `Payload: [{"id":1,"name":"alpha"},{"id":2,"name":"beta"}]`;
+    const input = {
+      messages: [
+        { role: "user", content: jsonText },
+        { role: "user", content: "Continue" },
+      ],
+    };
+    const optimized = optimizePayload("/v1/chat/completions", input, {
+      enableOptimization: true,
+      jsonCompaction: false,
+      minTokensToCompress: 1,
+      minCharsForBlockCompression: 1,
+      minSectionTokens: 1,
+      protectRecentCode: 0,
+      losslessCompaction: false,
+    }) as any;
+
+    assert.equal(optimized.messages[0].content, jsonText);
+  });
+
+  it("supports independent diff compaction control", () => {
+    const diff =
+      "diff --git a/file b/file\nindex 123..456 100644\n" +
+      "@@ -1 +1 @@\n" +
+      "-old\n+new\n";
+    const input = {
+      messages: [
+        { role: "user", content: diff },
+        { role: "user", content: "Continue" },
+      ],
+    };
+    const optimized = optimizePayload("/v1/chat/completions", input, {
+      enableOptimization: true,
+      diffCompaction: false,
+      minTokensToCompress: 1,
+      minCharsForBlockCompression: 1,
+      minSectionTokens: 1,
+      protectRecentCode: 0,
+    }) as any;
+
+    assert.match(optimized.messages[0].content, /index 123\.\.456 100644/);
   });
 });

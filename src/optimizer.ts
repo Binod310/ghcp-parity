@@ -7,6 +7,7 @@ import {
   isDiffOutput,
 } from "./lossless-compaction";
 import { compactDuplicateImports } from "./code-compaction";
+import { buildCcrMarker, storeCcrContent } from "./ccr";
 
 /**
  * Default tools to exclude from compression (from Headroom's DEFAULT_EXCLUDE_TOOLS).
@@ -72,6 +73,15 @@ export interface CompressionConfig {
   lossless_compaction?: boolean;
   /** Stop after lossless transforms; skip JSON and whitespace compaction. */
   lossless_only?: boolean;
+  /** Enable JSON array/object text compaction. */
+  json_compaction?: boolean;
+  /** Explicit pipeline mode; defaults to lossless_then_lossy. */
+  compression_mode?: "lossless" | "lossless_then_lossy";
+  enable_cross_turn_dedup?: boolean;
+  ccr_enabled?: boolean;
+  ccr_inject_marker?: boolean;
+  ccr_min_chars?: number;
+  relevance_split?: boolean;
   /**
    * Detect 'analyze'/'review' intent and protect code from compression.
    * When enabled, looks for keywords like "analyze", "review", "debug", "fix"
@@ -145,6 +155,11 @@ export interface CompressionConfig {
   code_aware_import_deduplication?: boolean;
   /** Per-tool overrides for compression safety and thresholds. */
   tool_profiles?: Record<string, ToolCompressionProfile>;
+  /** Names of registered external compressors to run after built-in stages. */
+  active_external_compressors?: string[];
+  log_compaction?: boolean;
+  search_compaction?: boolean;
+  diff_compaction?: boolean;
 }
 
 export interface ToolCompressionProfile {
@@ -155,6 +170,43 @@ export interface ToolCompressionProfile {
   min_chars_for_block_compression?: number;
   min_section_tokens?: number;
   code_aware_import_deduplication?: boolean;
+}
+
+export type ExternalCompressor = (text: string) => string;
+const externalCompressors = new Map<string, ExternalCompressor>();
+
+export function registerExternalCompressor(
+  name: string,
+  compressor: ExternalCompressor,
+): void {
+  externalCompressors.set(name.toLowerCase(), compressor);
+}
+
+export function loadExternalCompressors(paths: string[]): string[] {
+  const loaded: string[] = [];
+  for (const path of paths) {
+    try {
+      const moduleValue = require(path) as {
+        name?: unknown;
+        compress?: unknown;
+        default?: { name?: unknown; compress?: unknown };
+      };
+      const plugin = moduleValue.default ?? moduleValue;
+      if (
+        typeof plugin.name === "string" &&
+        typeof plugin.compress === "function"
+      ) {
+        registerExternalCompressor(
+          plugin.name,
+          plugin.compress as ExternalCompressor,
+        );
+        loaded.push(plugin.name);
+      }
+    } catch {
+      // Invalid plugin modules must not prevent proxy startup.
+    }
+  }
+  return loaded;
 }
 
 const DEFAULT_CONFIG: Required<CompressionConfig> = {
@@ -168,6 +220,13 @@ const DEFAULT_CONFIG: Required<CompressionConfig> = {
   accuracy_guard: undefined as any, // Normal mode
   lossless_compaction: true, // Enable by default (safe + effective)
   lossless_only: false,
+  json_compaction: true,
+  compression_mode: "lossless_then_lossy",
+  enable_cross_turn_dedup: false,
+  ccr_enabled: false,
+  ccr_inject_marker: true,
+  ccr_min_chars: 10000,
+  relevance_split: false,
   protect_analysis_context: true, // Headroom default for coding agents
   protect_error_outputs: true, // Preserve error content (Headroom default)
   error_protection_max_chars: 8000, // ~2K tokens (Headroom default)
@@ -180,6 +239,10 @@ const DEFAULT_CONFIG: Required<CompressionConfig> = {
   min_ratio_aggressive: 1.0, // Same under pressure (Headroom default)
   code_aware_import_deduplication: true,
   tool_profiles: {},
+  active_external_compressors: [],
+  log_compaction: true,
+  search_compaction: true,
+  diff_compaction: true,
 };
 
 // Deduplication cache: content hash → compressed version
@@ -513,12 +576,21 @@ function compressText(
   text: string,
   config: Required<CompressionConfig>,
   toolName?: string,
+  relevanceQuery?: string,
 ): string {
   const toolConfig = resolveToolConfig(config, toolName);
   // Basic whitespace normalization is safe for short plain-text messages.
   const normalizedText = compactText(text);
   if (text.length < toolConfig.min_chars_for_block_compression) {
     return normalizedText;
+  }
+
+  if (
+    config.ccr_enabled &&
+    config.ccr_inject_marker &&
+    text.length >= config.ccr_min_chars
+  ) {
+    return buildCcrMarker(storeCcrContent(text));
   }
 
   const estimatedTokens = estimateTokens(text);
@@ -528,17 +600,50 @@ function compressText(
 
   const sections = text.split(/(\n{2,})/);
   if (sections.length > 1) {
+    const relevanceTerms = config.relevance_split
+      ? tokenizeRelevanceQuery(relevanceQuery)
+      : [];
     return sections
       .map((section) =>
         /^\n+$/.test(section) ||
         estimateTokens(section) < toolConfig.min_section_tokens
           ? section
-          : compressTextBlock(section, toolConfig, toolName),
+          : relevanceTerms.length > 0 &&
+              hasRelevantTerm(section, relevanceTerms)
+            ? section
+            : compressTextBlock(section, toolConfig, toolName),
       )
       .join("");
   }
 
   return compressTextBlock(text, toolConfig, toolName);
+}
+
+function tokenizeRelevanceQuery(query: string | undefined): string[] {
+  return (query ?? "")
+    .toLowerCase()
+    .split(/[^a-z0-9_]+/)
+    .filter((term) => term.length >= 3)
+    .slice(0, 50);
+}
+
+function hasRelevantTerm(text: string, terms: string[]): boolean {
+  const lowerText = text.toLowerCase();
+  return terms.some((term) => lowerText.includes(term));
+}
+
+function latestUserText(messages: unknown[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      isRecord(message) &&
+      message.role === "user" &&
+      typeof message.content === "string"
+    ) {
+      return message.content;
+    }
+  }
+  return "";
 }
 
 function resolveToolConfig(
@@ -569,6 +674,7 @@ function compressTextBlock(
     accuracy_guard: config.accuracy_guard,
     lossless_compaction: config.lossless_compaction,
     lossless_only: config.lossless_only,
+    compression_mode: config.compression_mode,
   });
   if (contentCache.has(contentHash)) {
     return contentCache.get(contentHash)!;
@@ -605,18 +711,21 @@ function compressTextBlock(
 
   // Step 1: Apply lossless compaction for logs/grep/diffs
   if (config.lossless_compaction) {
+    const isSearchOutput = isGrepOutput(compressed);
+    const isLog =
+      isBashTool(toolName, config.bash_tool_names) || isLogOutput(compressed);
+    const isDiff = isDiffOutput(compressed);
     if (
-      isBashTool(toolName, config.bash_tool_names) ||
-      isGrepOutput(compressed) ||
-      isLogOutput(compressed) ||
-      isDiffOutput(compressed)
+      (config.search_compaction && isSearchOutput) ||
+      (config.log_compaction && isLog) ||
+      (config.diff_compaction && isDiff)
     ) {
       const lossless = compactLossless(compressed);
       if (lossless.length < compressed.length) {
         compressed = lossless;
       }
     }
-    if (config.lossless_only) {
+    if (config.lossless_only || config.compression_mode === "lossless") {
       const losslessResult =
         compressed.length < text.length ? compressed : text;
       contentCache.set(contentHash, losslessResult);
@@ -624,10 +733,28 @@ function compressTextBlock(
     }
   }
 
+  for (const name of config.active_external_compressors) {
+    const compressor = externalCompressors.get(name.toLowerCase());
+    if (!compressor) continue;
+    try {
+      const candidate = compressor(compressed);
+      if (
+        typeof candidate === "string" &&
+        candidate.length < compressed.length
+      ) {
+        compressed = candidate;
+      }
+    } catch {
+      // Plugin failures must not break request optimization.
+    }
+  }
+
   // Step 2: JSON array crushing (SmartCrusher)
-  const crushResult = crushJsonInText(compressed);
-  if (crushResult.crushed) {
-    compressed = crushResult.text;
+  if (config.json_compaction) {
+    const crushResult = crushJsonInText(compressed);
+    if (crushResult.crushed) {
+      compressed = crushResult.text;
+    }
   }
 
   // Step 3: Aggressive text compaction
@@ -688,11 +815,22 @@ export function optimizePayload(
         | "excludeTools"
         | "losslessCompaction"
         | "losslessOnly"
+        | "compressionMode"
+        | "enableCrossTurnDedup"
+        | "ccrEnabled"
+        | "ccrInjectMarker"
+        | "ccrMinChars"
+        | "relevanceSplit"
         | "strictAccuracyGuard"
         | "protectAnalysisContext"
         | "codeAwareImportDeduplication"
         | "toolProfiles"
         | "bashToolNames"
+        | "activeExternalCompressors"
+        | "logCompaction"
+        | "searchCompaction"
+        | "diffCompaction"
+        | "jsonCompaction"
       >
     >,
   config?: CompressionConfig,
@@ -754,6 +892,24 @@ export function optimizePayload(
     ...(options?.losslessOnly !== undefined
       ? { lossless_only: options.losslessOnly }
       : {}),
+    ...(options?.compressionMode !== undefined
+      ? { compression_mode: options.compressionMode }
+      : {}),
+    ...(options?.enableCrossTurnDedup !== undefined
+      ? { enable_cross_turn_dedup: options.enableCrossTurnDedup }
+      : {}),
+    ...(options?.ccrEnabled !== undefined
+      ? { ccr_enabled: options.ccrEnabled }
+      : {}),
+    ...(options?.ccrInjectMarker !== undefined
+      ? { ccr_inject_marker: options.ccrInjectMarker }
+      : {}),
+    ...(options?.ccrMinChars !== undefined
+      ? { ccr_min_chars: options.ccrMinChars }
+      : {}),
+    ...(options?.relevanceSplit !== undefined
+      ? { relevance_split: options.relevanceSplit }
+      : {}),
     ...(options?.strictAccuracyGuard === true
       ? { accuracy_guard: "strict" as const }
       : {}),
@@ -770,6 +926,21 @@ export function optimizePayload(
       : {}),
     ...(options?.bashToolNames !== undefined
       ? { bash_tool_names: options.bashToolNames }
+      : {}),
+    ...(options?.activeExternalCompressors !== undefined
+      ? { active_external_compressors: options.activeExternalCompressors }
+      : {}),
+    ...(options?.logCompaction !== undefined
+      ? { log_compaction: options.logCompaction }
+      : {}),
+    ...(options?.searchCompaction !== undefined
+      ? { search_compaction: options.searchCompaction }
+      : {}),
+    ...(options?.diffCompaction !== undefined
+      ? { diff_compaction: options.diffCompaction }
+      : {}),
+    ...(options?.jsonCompaction !== undefined
+      ? { json_compaction: options.jsonCompaction }
       : {}),
     ...config,
   };
@@ -850,6 +1021,9 @@ function optimizeChatCompletionsBody(
   const analysisIntent = config.protect_analysis_context
     ? detectAnalysisIntent(messages)
     : false;
+  const relevanceQuery = config.relevance_split
+    ? latestUserText(messages)
+    : undefined;
 
   // Determine message protection zones
   const frozenCount = Math.max(
@@ -863,6 +1037,7 @@ function optimizeChatCompletionsBody(
     0,
     totalMessages - config.protect_recent_code,
   );
+  const seenTurnContent = new Set<string>();
 
   next.messages = messages.map((message, index) => {
     if (!isRecord(message)) {
@@ -918,7 +1093,21 @@ function optimizeChatCompletionsBody(
         return message; // Preserve code verbatim for analysis
       }
 
-      messageCopy.content = compressText(content, config, toolName);
+      if (config.enable_cross_turn_dedup && content.length >= 500) {
+        if (seenTurnContent.has(content)) {
+          messageCopy.content =
+            "[Repeated content appears earlier in this conversation.]";
+          return messageCopy;
+        }
+        seenTurnContent.add(content);
+      }
+
+      messageCopy.content = compressText(
+        content,
+        config,
+        toolName,
+        relevanceQuery,
+      );
       return messageCopy;
     }
 
@@ -987,6 +1176,15 @@ function optimizeResponsesBody(
     cacheAnchoredPrefixLength(input),
   );
   const recentStart = Math.max(0, totalItems - config.protect_recent);
+  const relevanceQuery = config.relevance_split
+    ? (input
+        .filter(isRecord)
+        .reverse()
+        .find(
+          (item) => item.role === "user" && typeof item.content === "string",
+        )?.content as string | undefined)
+    : undefined;
+  const seenTurnContent = new Set<string>();
 
   next.input = input.map((item, index) => {
     // Frozen or recent zones - return verbatim
@@ -1008,7 +1206,15 @@ function optimizeResponsesBody(
 
     // Compress text field
     if (typeof item.text === "string") {
-      itemCopy.text = compressText(item.text, config, toolName);
+      if (config.enable_cross_turn_dedup && item.text.length >= 500) {
+        if (seenTurnContent.has(item.text)) {
+          itemCopy.text =
+            "[Repeated content appears earlier in this conversation.]";
+          return itemCopy;
+        }
+        seenTurnContent.add(item.text);
+      }
+      itemCopy.text = compressText(item.text, config, toolName, relevanceQuery);
     }
 
     // Compress content array
@@ -1019,7 +1225,20 @@ function optimizeResponsesBody(
         }
         const partCopy: Record<string, unknown> = { ...part };
         if (typeof part.text === "string") {
-          partCopy.text = compressText(part.text, config, toolName);
+          if (config.enable_cross_turn_dedup && part.text.length >= 500) {
+            if (seenTurnContent.has(part.text)) {
+              partCopy.text =
+                "[Repeated content appears earlier in this conversation.]";
+              return partCopy;
+            }
+            seenTurnContent.add(part.text);
+          }
+          partCopy.text = compressText(
+            part.text,
+            config,
+            toolName,
+            relevanceQuery,
+          );
         }
         return partCopy;
       });
@@ -1064,6 +1283,9 @@ function optimizeMessagesBody(
   const analysisIntent = config.protect_analysis_context
     ? detectAnalysisIntent(messages)
     : false;
+  const relevanceQuery = config.relevance_split
+    ? latestUserText(messages)
+    : undefined;
 
   next.messages = messages.map((message, index) => {
     // Frozen or recent zones - return verbatim
@@ -1113,7 +1335,12 @@ function optimizeMessagesBody(
         return message; // Preserve code verbatim for analysis
       }
 
-      messageCopy.content = compressText(content, config, toolName);
+      messageCopy.content = compressText(
+        content,
+        config,
+        toolName,
+        relevanceQuery,
+      );
       return messageCopy;
     }
 
