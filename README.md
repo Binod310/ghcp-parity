@@ -147,6 +147,219 @@ Pass same `--settings-file` value when one was used during setup.
 
 ## Run
 
+### All features
+
+Run the local proxy with every implemented optional feature enabled:
+
+```bash
+npm run dev -- proxy --port 8796 --all
+```
+
+The `--all` option sets `COPILOT_PARITY_ALL=1` behavior for this process. The
+equivalent environment-only command, useful for Docker, launchd, or systemd,
+is:
+
+```bash
+COPILOT_PARITY_ALL=1 npm run dev -- proxy --port 8796
+```
+
+This enables the following optional behaviors in addition to the normal safe
+defaults:
+
+| Optional behavior                         | Environment variable enabled by the preset |
+| ----------------------------------------- | ------------------------------------------ |
+| Assistant text compression                | `COPILOT_PARITY_COMPRESS_ASSISTANT=1`      |
+| XML/tagged-content compression            | `COPILOT_PARITY_COMPRESS_TAGGED=1`         |
+| Cross-turn repeated-content deduplication | `COPILOT_PARITY_CROSS_TURN_DEDUP=1`        |
+| Context compression references (CCR)      | `COPILOT_PARITY_CCR=1`                     |
+| Relevance-aware section splitting         | `COPILOT_PARITY_RELEVANCE_SPLIT=1`         |
+| Strict compression accuracy guard         | `COPILOT_PARITY_STRICT_ACCURACY=1`         |
+| Ultra terse response instructions         | `COPILOT_PARITY_TERSE_MODE=ultra`          |
+
+An explicitly supplied individual variable takes precedence over the preset.
+For example, this enables all features except terse output:
+
+```bash
+COPILOT_PARITY_TERSE_MODE=off npm run dev -- proxy --port 8796 --all
+```
+
+### Use in another organization
+
+The parity implementation is organization-independent. To reproduce it in
+another organization, transfer the parity proxy code and configure that
+organization's GitHub Copilot authentication; no organization name or model
+ID is hard-coded into the feature implementation.
+
+The relevant implementation surfaces are:
+
+| File                                                       | Change or responsibility                                                                                   |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| [`src/optimizer.ts`](src/optimizer.ts)                     | Performs input compaction, protection, deduplication, relevance splitting, and accuracy-gated compression. |
+| [`src/lossless-compaction.ts`](src/lossless-compaction.ts) | Applies reversible log, grep, diff, and related transforms.                                                |
+| [`src/json-crusher.ts`](src/json-crusher.ts)               | Compacts eligible JSON and structured tool content.                                                        |
+| [`src/code-compaction.ts`](src/code-compaction.ts)         | Removes exact duplicate JavaScript/TypeScript imports.                                                     |
+| [`src/terse-mode.ts`](src/terse-mode.ts)                   | Adds the configured concise-response instruction.                                                          |
+| [`src/server.ts`](src/server.ts)                           | Resolves runtime defaults and environment variables, including the all-features preset.                    |
+| [`src/cli.ts`](src/cli.ts)                                 | Provides `proxy --all` and `serve --all`.                                                                  |
+| [`src/types.ts`](src/types.ts)                             | Defines the shared `ServerOptions` feature contract.                                                       |
+| [`src/auth.ts`](src/auth.ts)                               | Handles GitHub device login, Copilot token exchange, refresh, and local credential storage.                |
+| [`tests/optimizer.test.ts`](tests/optimizer.test.ts)       | Covers the feature behavior and opt-in boundaries.                                                         |
+
+After transferring the code, install and build it, authenticate as a user who
+has Copilot access in the target organization, and start the proxy:
+
+```bash
+npm install
+npm run build
+npm run dev -- copilot-auth login
+npm run dev -- proxy --port 8796 --all
+```
+
+For a built deployment, use the compiled CLI instead:
+
+```bash
+COPILOT_PARITY_ALL=1 node dist/cli.js proxy --port 8796
+```
+
+Verify the active configuration. The management token is optional unless one
+was configured with `COPILOT_PARITY_MANAGEMENT_TOKEN`:
+
+```bash
+curl -sS http://127.0.0.1:8796/health
+curl -sS -H "Authorization: Bearer $COPILOT_PARITY_MANAGEMENT_TOKEN" \
+  http://127.0.0.1:8796/stats/config
+```
+
+The all-features preset is intended for controlled testing and advanced
+deployments. CCR markers require a client or tool loop that understands and
+can retrieve them; native VS Code Copilot does not retrieve CCR markers itself.
+Terse mode changes response style, and assistant compression can reduce
+provider prefix-cache hits, so normal startup keeps both behaviors opt-in.
+
+### Exact code changes to copy to another organization
+
+If the other organization cannot access this repository, apply the following
+manual edits to the matching files. These are the complete changes required for
+the all-features preset.
+
+#### 1. Update `src/cli.ts`
+
+In both the `proxy` command and the `serve` alias, add this option immediately
+after the existing port option:
+
+```typescript
+.option("--all", "enable every optional parity feature")
+```
+
+Then add this block as the first statement in each command's existing action:
+
+```typescript
+if (options.all) {
+  enableAllFeatures();
+}
+```
+
+At the bottom of `src/cli.ts`, after `program.parse();`, add:
+
+```typescript
+function enableAllFeatures(): void {
+  const optionalFeatures: Record<string, string> = {
+    COPILOT_PARITY_COMPRESS_ASSISTANT: "1",
+    COPILOT_PARITY_COMPRESS_TAGGED: "1",
+    COPILOT_PARITY_CROSS_TURN_DEDUP: "1",
+    COPILOT_PARITY_CCR: "1",
+    COPILOT_PARITY_RELEVANCE_SPLIT: "1",
+    COPILOT_PARITY_STRICT_ACCURACY: "1",
+    COPILOT_PARITY_TERSE_MODE: "ultra",
+  };
+
+  for (const [name, value] of Object.entries(optionalFeatures)) {
+    if (process.env[name] === undefined) {
+      process.env[name] = value;
+    }
+  }
+}
+```
+
+The complete resulting command shape is:
+
+```typescript
+program
+  .command("proxy")
+  .description("Start local proxy")
+  .option("-p, --port <port>", "port to bind", "8792")
+  .option("--all", "enable every optional parity feature")
+  .action((options) => {
+    if (options.all) {
+      enableAllFeatures();
+    }
+    const port = Number(options.port);
+    const app = createServer();
+    // Keep the existing app.listen implementation below this point.
+  });
+```
+
+#### 2. Update `src/server.ts`
+
+At the beginning of `resolveServerOptions()`, define the preset flag:
+
+```typescript
+const allFeatures = process.env.COPILOT_PARITY_ALL === "1";
+```
+
+Replace the seven optional feature expressions with the following exact code:
+
+```typescript
+compressAssistantTextBlocks:
+  customOptions?.compressAssistantTextBlocks ??
+  resolveFeatureFlag(
+    process.env.COPILOT_PARITY_COMPRESS_ASSISTANT,
+    allFeatures,
+  ),
+compressTaggedContent:
+  customOptions?.compressTaggedContent ??
+  resolveFeatureFlag(process.env.COPILOT_PARITY_COMPRESS_TAGGED, allFeatures),
+enableCrossTurnDedup:
+  customOptions?.enableCrossTurnDedup ??
+  resolveFeatureFlag(
+    process.env.COPILOT_PARITY_CROSS_TURN_DEDUP,
+    allFeatures,
+  ),
+ccrEnabled:
+  customOptions?.ccrEnabled ??
+  resolveFeatureFlag(process.env.COPILOT_PARITY_CCR, allFeatures),
+relevanceSplit:
+  customOptions?.relevanceSplit ??
+  resolveFeatureFlag(process.env.COPILOT_PARITY_RELEVANCE_SPLIT, allFeatures),
+strictAccuracyGuard:
+  customOptions?.strictAccuracyGuard ??
+  resolveFeatureFlag(
+    process.env.COPILOT_PARITY_STRICT_ACCURACY,
+    allFeatures,
+  ),
+defaultTerseLevel:
+  customOptions?.defaultTerseLevel ??
+  (process.env
+    .COPILOT_PARITY_TERSE_MODE as ServerOptions["defaultTerseLevel"]) ??
+  (allFeatures ? "ultra" : "off"),
+```
+
+Add this helper below `resolveServerOptions()` and before the existing parsing
+helpers:
+
+```typescript
+function resolveFeatureFlag(
+  value: string | undefined,
+  allFeatures: boolean,
+): boolean {
+  return value === undefined ? allFeatures : value === "1";
+}
+```
+
+The precedence is intentional: `customOptions` wins first, an explicit feature
+environment variable wins second, and `COPILOT_PARITY_ALL=1` supplies the value
+only when neither is present.
+
 Start the proxy with input optimization:
 
 ```bash

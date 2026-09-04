@@ -1358,6 +1358,7 @@ export function createServer(customOptions?: Partial<ServerOptions>) {
 function resolveServerOptions(
   customOptions?: Partial<ServerOptions>,
 ): ServerOptions {
+  const allFeatures = process.env.COPILOT_PARITY_ALL === "1";
   return {
     copilotBaseUrl:
       customOptions?.copilotBaseUrl ??
@@ -1398,7 +1399,10 @@ function resolveServerOptions(
       process.env.COPILOT_PARITY_COMPRESS_SYSTEM !== "0",
     compressAssistantTextBlocks:
       customOptions?.compressAssistantTextBlocks ??
-      process.env.COPILOT_PARITY_COMPRESS_ASSISTANT === "1",
+      resolveFeatureFlag(
+        process.env.COPILOT_PARITY_COMPRESS_ASSISTANT,
+        allFeatures,
+      ),
     minCompressionRatioRelaxed:
       customOptions?.minCompressionRatioRelaxed ??
       parseRatioEnvironment(process.env.COPILOT_PARITY_MIN_RATIO_RELAXED, 1),
@@ -1443,7 +1447,10 @@ function resolveServerOptions(
       ),
     compressTaggedContent:
       customOptions?.compressTaggedContent ??
-      process.env.COPILOT_PARITY_COMPRESS_TAGGED === "1",
+      resolveFeatureFlag(
+        process.env.COPILOT_PARITY_COMPRESS_TAGGED,
+        allFeatures,
+      ),
     excludeTools:
       customOptions?.excludeTools ??
       parseListEnvironment(process.env.COPILOT_PARITY_EXCLUDE_TOOLS),
@@ -1460,9 +1467,13 @@ function resolveServerOptions(
         : "lossless_then_lossy"),
     enableCrossTurnDedup:
       customOptions?.enableCrossTurnDedup ??
-      process.env.COPILOT_PARITY_CROSS_TURN_DEDUP === "1",
+      resolveFeatureFlag(
+        process.env.COPILOT_PARITY_CROSS_TURN_DEDUP,
+        allFeatures,
+      ),
     ccrEnabled:
-      customOptions?.ccrEnabled ?? process.env.COPILOT_PARITY_CCR === "1",
+      customOptions?.ccrEnabled ??
+      resolveFeatureFlag(process.env.COPILOT_PARITY_CCR, allFeatures),
     ccrInjectMarker:
       customOptions?.ccrInjectMarker ??
       process.env.COPILOT_PARITY_CCR_INJECT_MARKER !== "0",
@@ -1480,10 +1491,16 @@ function resolveServerOptions(
       ),
     relevanceSplit:
       customOptions?.relevanceSplit ??
-      process.env.COPILOT_PARITY_RELEVANCE_SPLIT === "1",
+      resolveFeatureFlag(
+        process.env.COPILOT_PARITY_RELEVANCE_SPLIT,
+        allFeatures,
+      ),
     strictAccuracyGuard:
       customOptions?.strictAccuracyGuard ??
-      process.env.COPILOT_PARITY_STRICT_ACCURACY === "1",
+      resolveFeatureFlag(
+        process.env.COPILOT_PARITY_STRICT_ACCURACY,
+        allFeatures,
+      ),
     protectAnalysisContext:
       customOptions?.protectAnalysisContext ??
       process.env.COPILOT_PARITY_PROTECT_ANALYSIS !== "0",
@@ -1520,8 +1537,15 @@ function resolveServerOptions(
       customOptions?.defaultTerseLevel ??
       (process.env
         .COPILOT_PARITY_TERSE_MODE as ServerOptions["defaultTerseLevel"]) ??
-      "off",
+      (allFeatures ? "ultra" : "off"),
   };
+}
+
+function resolveFeatureFlag(
+  value: string | undefined,
+  allFeatures: boolean,
+): boolean {
+  return value === undefined ? allFeatures : value === "1";
 }
 
 function parseRatioEnvironment(value: string | undefined, fallback: number) {

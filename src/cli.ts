@@ -25,7 +25,11 @@ program
   .command("proxy")
   .description("Start local proxy")
   .option("-p, --port <port>", "port to bind", "8792")
+  .option("--all", "enable every optional parity feature")
   .action((options) => {
+    if (options.all) {
+      enableAllFeatures();
+    }
     const port = Number(options.port);
     const app = createServer();
     const httpServer = app.listen(port, "127.0.0.1", () => {
@@ -201,7 +205,11 @@ program
   .command("serve")
   .description("Alias for proxy")
   .option("-p, --port <port>", "port to bind", "8792")
+  .option("--all", "enable every optional parity feature")
   .action((options) => {
+    if (options.all) {
+      enableAllFeatures();
+    }
     const port = Number(options.port);
     const app = createServer();
     const httpServer = app.listen(port, "127.0.0.1", () => {
@@ -260,3 +268,21 @@ wrap
   });
 
 program.parse();
+
+function enableAllFeatures(): void {
+  const optionalFeatures: Record<string, string> = {
+    COPILOT_PARITY_COMPRESS_ASSISTANT: "1",
+    COPILOT_PARITY_COMPRESS_TAGGED: "1",
+    COPILOT_PARITY_CROSS_TURN_DEDUP: "1",
+    COPILOT_PARITY_CCR: "1",
+    COPILOT_PARITY_RELEVANCE_SPLIT: "1",
+    COPILOT_PARITY_STRICT_ACCURACY: "1",
+    COPILOT_PARITY_TERSE_MODE: "ultra",
+  };
+
+  for (const [name, value] of Object.entries(optionalFeatures)) {
+    if (process.env[name] === undefined) {
+      process.env[name] = value;
+    }
+  }
+}
